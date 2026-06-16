@@ -6,6 +6,13 @@ local.properties
 **/local.properties
 .idea/
 **/.idea/
+*.iml
+*.ipr
+*.iws
+.classpath
+.project
+**/.classpath
+**/.project
 .gradle/
 **/.gradle/
 build/
