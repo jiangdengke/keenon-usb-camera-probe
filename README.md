@@ -4,7 +4,7 @@
 
 ## 当前实现
 
-- 基于 `third_party/UVCCamera` 的 `usbCameraTest7` 改造。
+- 基于 UVCCamera 的 UVC 能力改造，当前只保留一个 `app` 探针模块。
 - App 名称：`Keenon UVC Multi Probe`。
 - 包名：`com.serenegiant.usbcameratest7`。
 - 启动后自动扫描 USB 设备，筛选 UVC 摄像头。
@@ -21,21 +21,29 @@
 
 ## 项目位置
 
-Android/Gradle 项目根目录：
+Android/Gradle 项目根目录就是仓库根目录：
 
 ```bash
-keenon-usb-camera-probe/third_party/UVCCamera
+keenon-usb-camera-probe
 ```
 
 主要改动文件：
 
 ```text
-third_party/UVCCamera/usbCameraTest7/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java
-third_party/UVCCamera/usbCameraTest7/src/main/AndroidManifest.xml
-third_party/UVCCamera/usbCameraTest7/src/main/res/values/strings.xml
-third_party/UVCCamera/settings.gradle
-third_party/UVCCamera/build.gradle
-third_party/UVCCamera/libuvccamera/src/main/jni/Application.mk
+app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java
+app/src/main/AndroidManifest.xml
+app/src/main/res/values/strings.xml
+settings.gradle
+build.gradle
+libuvccamera/src/main/jni/Application.mk
+```
+
+仓库已经删除未使用的上游 sample，只保留：
+
+```text
+app/           # 擎朗多路 UVC 探针 App
+libuvccamera/  # UVC native/Java 库
+gradle/        # Gradle wrapper
 ```
 
 ## 构建环境
@@ -59,7 +67,7 @@ third_party/UVCCamera/libuvccamera/src/main/jni/Application.mk
 
 ## local.properties
 
-在 `third_party/UVCCamera` 下创建 `local.properties`，内容参考：
+在仓库根目录创建 `local.properties`，内容参考：
 
 ```properties
 sdk.dir=/opt/homebrew/share/android-commandlinetools
@@ -76,26 +84,26 @@ cp local.properties.example local.properties
 
 ## 构建 APK
 
-在 Android/Gradle 项目根目录执行：
+在仓库根目录执行：
 
 ```bash
-cd keenon-usb-camera-probe/third_party/UVCCamera
-./gradlew :usbCameraTest7:assembleDebug
+cd keenon-usb-camera-probe
+./gradlew :app:assembleDebug
 ```
 
 输出 APK：
 
 ```text
-usbCameraTest7/build/outputs/apk/debug/usbCameraTest7-debug.apk
+app/build/outputs/apk/debug/app-debug.apk
 ```
 
-注意：如果当前克隆的上游仓库缺少 `gradle/wrapper/gradle-wrapper.jar`，需要先恢复 wrapper jar，或直接在 Android Studio 里用 JDK 17 / Gradle 8.7 运行 `:usbCameraTest7:assembleDebug`。
+注意：如果当前克隆的上游仓库缺少 `gradle/wrapper/gradle-wrapper.jar`，需要先恢复 wrapper jar，或直接在 Android Studio 里用 JDK 17 / Gradle 8.7 运行 `:app:assembleDebug`。
 
 ## 安装到机器人
 
 ```bash
 adb devices
-adb install -r usbCameraTest7/build/outputs/apk/debug/usbCameraTest7-debug.apk
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell monkey -p com.serenegiant.usbcameratest7 1
 ```
 
