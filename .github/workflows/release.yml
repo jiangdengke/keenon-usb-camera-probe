@@ -1,0 +1,109 @@
+name: Build and Release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  ANDROID_COMPILE_SDK: '34'
+  ANDROID_BUILD_TOOLS: '34.0.0'
+  ANDROID_NDK_VERSION: '25.1.8937393'
+  APK_BASENAME: keenon-uvc-multi-probe
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK and NDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-${ANDROID_COMPILE_SDK}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
+            "ndk;${ANDROID_NDK_VERSION}"
+
+      - name: Create local.properties
+        run: |
+          {
+            echo "sdk.dir=${ANDROID_HOME}"
+            echo "ndk.dir=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
+          } > local.properties
+
+      - name: Resolve app version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "APP_VERSION_NAME=${GITHUB_REF_NAME#v}" >> "${GITHUB_ENV}"
+          else
+            echo "APP_VERSION_NAME=0.0.${GITHUB_RUN_NUMBER}" >> "${GITHUB_ENV}"
+          fi
+          echo "APP_VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "${GITHUB_ENV}"
+
+      - name: Build debug APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew clean :app:assembleDebug --stacktrace
+
+      - name: Prepare APK artifact
+        id: artifact
+        run: |
+          mkdir -p release
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION_SUFFIX="${GITHUB_REF_NAME}"
+          else
+            VERSION_SUFFIX="manual-${GITHUB_RUN_NUMBER}"
+          fi
+          APK_FILE="release/${APK_BASENAME}-${VERSION_SUFFIX}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "${APK_FILE}"
+          echo "apk_file=${APK_FILE}" >> "${GITHUB_OUTPUT}"
+          echo "apk_name=$(basename "${APK_FILE}")" >> "${GITHUB_OUTPUT}"
+
+      - name: Write release notes
+        run: |
+          cat > release/RELEASE_NOTES.md <<EOF
+          ## 更新内容
+          - 自动构建 Keenon UVC Multi Probe APK
+          - 包含 armeabi-v7a 与 arm64-v8a native 库
+          - 适用于 USB/UVC 多摄像头探针验证
+
+          ## 安装
+          \`\`\`bash
+          adb install -r ${{ steps.artifact.outputs.apk_name }}
+          \`\`\`
+          EOF
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APK_BASENAME }}
+          path: release/*.apk
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Keenon UVC Multi Probe ${{ github.ref_name }}
+          body_path: release/RELEASE_NOTES.md
+          files: release/*.apk
+          fail_on_unmatched_files: true

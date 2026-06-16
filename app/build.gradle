@@ -23,6 +23,9 @@
 
 apply plugin: 'com.android.application'
 
+def ciVersionCode = System.getenv('APP_VERSION_CODE')
+def ciVersionName = System.getenv('APP_VERSION_NAME')
+
 android {
 	namespace 'com.serenegiant.usbcameratest7'
 	compileSdkVersion versionCompiler
@@ -37,8 +40,8 @@ android {
         applicationId "com.serenegiant.usbcameratest7"
 		minSdkVersion 19
 		targetSdkVersion versionTarget
-		versionCode 9
-		versionName "3.00"
+		versionCode ciVersionCode ? ciVersionCode.toInteger() : 9
+		versionName ciVersionName ?: "3.00"
         ndk {
             abiFilters 'armeabi-v7a', 'arm64-v8a'
         }

@@ -113,6 +113,27 @@ adb shell monkey -p com.serenegiant.usbcameratest7 1
 adb logcat -s KeenonUvcProbe UVCCamera USBMonitor
 ```
 
+## GitHub Release 自动发布
+
+仓库已配置 GitHub Actions：推送 `v*` tag 后会自动构建 APK，并上传到对应的 GitHub Release。
+
+发布一个新版本：
+
+```bash
+git tag -a v0.1.0 -m "发布 v0.1.0"
+git push origin v0.1.0
+```
+
+Workflow 会执行：
+
+1. 安装 JDK 17、Android SDK 34、Build Tools 34.0.0、NDK 25.1.8937393。
+2. 生成 CI 用 `local.properties`。
+3. 构建 `:app:assembleDebug`。
+4. 将 APK 命名为 `keenon-uvc-multi-probe-vX.Y.Z.apk`。
+5. 创建/更新 GitHub Release 并上传 APK。
+
+也可以在 GitHub Actions 页面手动触发 workflow。手动触发只上传 workflow artifact，不创建 Release。
+
 ## 验证标准
 
 1. App 顶部状态显示类似：
