@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# Local Android/Gradle configuration
+local.properties
+**/local.properties
+.idea/
+**/.idea/
+.gradle/
+**/.gradle/
+build/
+**/build/
+
+# Build artifacts
+*.apk
+*.ap_
+*.dex
+*.class
+
+# Temporary backups
+.git.upstream-backup/
+**/.git.upstream-backup/

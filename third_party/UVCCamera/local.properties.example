@@ -1,0 +1,5 @@
+# Copy this file to local.properties and replace the paths with your local SDK/NDK paths.
+# This project uses the legacy ndk-build flow from the original UVCCamera project.
+
+sdk.dir=/opt/homebrew/share/android-commandlinetools
+ndk.dir=/opt/homebrew/share/android-commandlinetools/ndk/25.1.8937393
