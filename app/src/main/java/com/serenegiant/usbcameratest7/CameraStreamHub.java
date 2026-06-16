@@ -1,0 +1,490 @@
+package com.serenegiant.usbcameratest7;
+
+import android.graphics.ImageFormat;
+import android.graphics.Rect;
+import android.graphics.YuvImage;
+import android.util.Log;
+
+import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.util.Enumeration;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
+
+/**
+ * Small in-process HTTP server that exposes opened UVC camera frames as MJPEG.
+ */
+final class CameraStreamHub {
+    interface LogSink {
+        void log(String message);
+    }
+
+    private static final String TAG = "KeenonStreamHub";
+    private static final int JPEG_QUALITY = 60;
+    private static final int MIN_JPEG_INTERVAL_MS = 200;
+    private static final int CLIENT_IDLE_SLEEP_MS = 100;
+    private static final String BOUNDARY = "keenonframe";
+
+    private final SlotState[] mSlots;
+    private final int mPort;
+    private final LogSink mLogSink;
+
+    private ServerSocket mServerSocket;
+    private ExecutorService mClientExecutor;
+    private Thread mAcceptThread;
+    private volatile boolean mRunning;
+    private volatile String mBaseUrl;
+
+    CameraStreamHub(final int slotCount, final int port, final LogSink logSink) {
+        mSlots = new SlotState[slotCount];
+        for (int i = 0; i < slotCount; i++) {
+            mSlots[i] = new SlotState(i);
+        }
+        mPort = port;
+        mLogSink = logSink;
+        mBaseUrl = "http://" + resolveLocalIpAddress() + ":" + port;
+    }
+
+    synchronized void start() {
+        if (mRunning) return;
+        try {
+            mServerSocket = new ServerSocket(mPort);
+            mServerSocket.setReuseAddress(true);
+            mClientExecutor = Executors.newCachedThreadPool();
+            mRunning = true;
+            mBaseUrl = "http://" + resolveLocalIpAddress() + ":" + mPort;
+            mAcceptThread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    acceptLoop();
+                }
+            }, "KeenonMjpegAccept");
+            mAcceptThread.start();
+            log("HTTP MJPEG server started: " + mBaseUrl);
+        } catch (final IOException e) {
+            mRunning = false;
+            closeQuietly(mServerSocket);
+            mServerSocket = null;
+            log("HTTP MJPEG server failed: " + e.getMessage());
+        }
+    }
+
+    synchronized void stop() {
+        if (!mRunning) return;
+        mRunning = false;
+        closeQuietly(mServerSocket);
+        mServerSocket = null;
+        if (mClientExecutor != null) {
+            mClientExecutor.shutdownNow();
+            mClientExecutor = null;
+        }
+        log("HTTP MJPEG server stopped");
+    }
+
+    boolean isRunning() {
+        return mRunning;
+    }
+
+    String getBaseUrl() {
+        return mBaseUrl;
+    }
+
+    String getStreamUrl(final int slotIndex) {
+        return mBaseUrl + "/stream/" + slotIndex + ".mjpeg";
+    }
+
+    String getSlotLabelExtra(final int slotIndex) {
+        if (!isValidSlot(slotIndex)) return "";
+        final SlotState slot = mSlots[slotIndex];
+        final long jpegAge = slot.latestJpegTimestampMs > 0
+            ? Math.max(0, System.currentTimeMillis() - slot.latestJpegTimestampMs) : -1;
+        final StringBuilder sb = new StringBuilder();
+        sb.append("\nstream=/stream/").append(slotIndex).append(".mjpeg");
+        sb.append("\njpeg=").append(slot.jpegCount.get());
+        if (jpegAge >= 0) {
+            sb.append(" age=").append(jpegAge).append("ms");
+        } else {
+            sb.append(" age=none");
+        }
+        return sb.toString();
+    }
+
+    String buildHealthSummary() {
+        final StringBuilder sb = new StringBuilder("Health:");
+        for (final SlotState slot : mSlots) {
+            sb.append(' ').append(slot.shortSummary());
+        }
+        return sb.toString();
+    }
+
+    void onSlotReady(final int slotIndex) {
+        if (!isValidSlot(slotIndex)) return;
+        final SlotState slot = mSlots[slotIndex];
+        slot.status = "READY";
+    }
+
+    void onSlotOpened(final int slotIndex, final String deviceLabel, final int width,
+        final int height, final String formatName) {
+        if (!isValidSlot(slotIndex)) return;
+        final SlotState slot = mSlots[slotIndex];
+        slot.status = "OPEN";
+        slot.deviceLabel = deviceLabel;
+        slot.width = width;
+        slot.height = height;
+        slot.formatName = formatName;
+        slot.latestJpegData = null;
+        slot.latestJpegTimestampMs = 0;
+        slot.jpegCount.set(0);
+        log("Slot " + (slotIndex + 1) + " stream ready: " + getStreamUrl(slotIndex));
+    }
+
+    void onSlotClosed(final int slotIndex, final String status) {
+        if (!isValidSlot(slotIndex)) return;
+        final SlotState slot = mSlots[slotIndex];
+        slot.status = status;
+        slot.deviceLabel = null;
+        slot.width = 0;
+        slot.height = 0;
+        slot.formatName = null;
+        slot.fps = 0f;
+        slot.frameCount = 0;
+        slot.latestJpegData = null;
+        slot.latestJpegTimestampMs = 0;
+        slot.jpegCount.set(0);
+    }
+
+    void onSlotFps(final int slotIndex, final String status, final long frameCount, final float fps) {
+        if (!isValidSlot(slotIndex)) return;
+        final SlotState slot = mSlots[slotIndex];
+        slot.status = status;
+        slot.frameCount = frameCount;
+        slot.fps = fps;
+    }
+
+    void onFrame(final int slotIndex, final ByteBuffer frame, final int width, final int height) {
+        if (!isValidSlot(slotIndex) || frame == null || width <= 0 || height <= 0) return;
+        final SlotState slot = mSlots[slotIndex];
+        final long now = System.currentTimeMillis();
+        if (now - slot.lastJpegEncodeMs < MIN_JPEG_INTERVAL_MS) return;
+        slot.lastJpegEncodeMs = now;
+
+        try {
+            final int expectedSize = width * height * 3 / 2;
+            final ByteBuffer source = frame.asReadOnlyBuffer();
+            source.clear();
+            if (source.remaining() < expectedSize) return;
+
+            final byte[] nv21 = new byte[expectedSize];
+            source.get(nv21);
+
+            final ByteArrayOutputStream jpegOut = new ByteArrayOutputStream(expectedSize / 4);
+            final YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, width, height, null);
+            if (yuvImage.compressToJpeg(new Rect(0, 0, width, height), JPEG_QUALITY, jpegOut)) {
+                slot.latestJpegData = jpegOut.toByteArray();
+                slot.latestJpegTimestampMs = now;
+                slot.jpegCount.incrementAndGet();
+            }
+        } catch (final Exception e) {
+            if (now - slot.lastJpegErrorLogMs > 5000) {
+                slot.lastJpegErrorLogMs = now;
+                log("Slot " + (slotIndex + 1) + " JPEG encode failed: " + e.getMessage());
+            }
+        }
+    }
+
+    private void acceptLoop() {
+        while (mRunning) {
+            try {
+                final Socket socket = mServerSocket.accept();
+                final ExecutorService executor = mClientExecutor;
+                if (executor != null) {
+                    executor.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            handleClient(socket);
+                        }
+                    });
+                } else {
+                    closeQuietly(socket);
+                }
+            } catch (final IOException e) {
+                if (mRunning) {
+                    log("HTTP accept failed: " + e.getMessage());
+                }
+            }
+        }
+    }
+
+    private void handleClient(final Socket socket) {
+        try {
+            socket.setTcpNoDelay(true);
+            final BufferedReader reader = new BufferedReader(
+                new InputStreamReader(socket.getInputStream(), "US-ASCII"));
+            final String requestLine = reader.readLine();
+            if (requestLine == null) return;
+
+            String headerLine;
+            while ((headerLine = reader.readLine()) != null && headerLine.length() > 0) {
+                // Consume headers; this lightweight server only supports GET.
+            }
+
+            final String path = parsePath(requestLine);
+            final OutputStream out = socket.getOutputStream();
+            if ("/".equals(path)) {
+                sendText(out, "200 OK", "text/plain; charset=utf-8", buildIndexText());
+            } else if ("/cameras".equals(path)) {
+                sendText(out, "200 OK", "application/json; charset=utf-8", buildCamerasJson());
+            } else if (path.startsWith("/snapshot/")) {
+                handleSnapshot(path, out);
+            } else if (path.startsWith("/stream/")) {
+                handleStream(path, socket, out);
+            } else {
+                sendText(out, "404 Not Found", "text/plain; charset=utf-8", "Not found\n");
+            }
+        } catch (final Exception e) {
+            Log.w(TAG, "HTTP client failed", e);
+        } finally {
+            closeQuietly(socket);
+        }
+    }
+
+    private String parsePath(final String requestLine) {
+        final String[] parts = requestLine.split(" ");
+        if (parts.length < 2 || !"GET".equals(parts[0])) return "/unsupported";
+        final int queryIndex = parts[1].indexOf('?');
+        return queryIndex >= 0 ? parts[1].substring(0, queryIndex) : parts[1];
+    }
+
+    private void handleSnapshot(final String path, final OutputStream out) throws IOException {
+        final int slotIndex = parseSlotIndex(path, "/snapshot/", ".jpg");
+        if (!isValidSlot(slotIndex)) {
+            sendText(out, "404 Not Found", "text/plain; charset=utf-8", "Invalid camera slot\n");
+            return;
+        }
+        final byte[] jpeg = mSlots[slotIndex].latestJpegData;
+        if (jpeg == null) {
+            sendText(out, "503 Service Unavailable", "text/plain; charset=utf-8", "No JPEG frame yet\n");
+            return;
+        }
+        writeHeaders(out, "200 OK", "image/jpeg", jpeg.length);
+        out.write(jpeg);
+        out.flush();
+    }
+
+    private void handleStream(final String path, final Socket socket, final OutputStream out)
+        throws IOException, InterruptedException {
+        final int slotIndex = parseSlotIndex(path, "/stream/", ".mjpeg");
+        if (!isValidSlot(slotIndex)) {
+            sendText(out, "404 Not Found", "text/plain; charset=utf-8", "Invalid camera slot\n");
+            return;
+        }
+        final SlotState slot = mSlots[slotIndex];
+        log("MJPEG client connected: slot " + (slotIndex + 1) + " from "
+            + socket.getInetAddress().getHostAddress());
+        writeStreamHeaders(out);
+
+        long lastSentFrameMs = 0;
+        while (mRunning && !socket.isClosed()) {
+            final byte[] jpeg = slot.latestJpegData;
+            final long frameMs = slot.latestJpegTimestampMs;
+            if (jpeg != null && frameMs != lastSentFrameMs) {
+                writeMjpegFrame(out, jpeg);
+                lastSentFrameMs = frameMs;
+            } else {
+                Thread.sleep(CLIENT_IDLE_SLEEP_MS);
+            }
+        }
+    }
+
+    private int parseSlotIndex(final String path, final String prefix, final String extension) {
+        if (!path.startsWith(prefix)) return -1;
+        String value = path.substring(prefix.length());
+        if (value.endsWith(extension)) {
+            value = value.substring(0, value.length() - extension.length());
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (final NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    private String buildIndexText() {
+        final StringBuilder sb = new StringBuilder();
+        sb.append("Keenon UVC Multi Probe\n");
+        sb.append("Base URL: ").append(mBaseUrl).append("\n");
+        sb.append("GET ").append(mBaseUrl).append("/cameras\n");
+        for (int i = 0; i < mSlots.length; i++) {
+            sb.append("GET ").append(mBaseUrl).append("/stream/").append(i).append(".mjpeg\n");
+            sb.append("GET ").append(mBaseUrl).append("/snapshot/").append(i).append(".jpg\n");
+        }
+        return sb.toString();
+    }
+
+    private String buildCamerasJson() {
+        final long now = System.currentTimeMillis();
+        final StringBuilder sb = new StringBuilder();
+        sb.append('{');
+        sb.append("\"baseUrl\":\"").append(jsonEscape(mBaseUrl)).append("\",");
+        sb.append("\"cameras\":[");
+        for (int i = 0; i < mSlots.length; i++) {
+            if (i > 0) sb.append(',');
+            final SlotState slot = mSlots[i];
+            final long jpegAgeMs = slot.latestJpegTimestampMs > 0 ? now - slot.latestJpegTimestampMs : -1;
+            sb.append('{')
+                .append("\"slot\":").append(i).append(',')
+                .append("\"status\":\"").append(jsonEscape(slot.status)).append("\",")
+                .append("\"device\":\"").append(jsonEscape(slot.deviceLabel)).append("\",")
+                .append("\"width\":").append(slot.width).append(',')
+                .append("\"height\":").append(slot.height).append(',')
+                .append("\"format\":\"").append(jsonEscape(slot.formatName)).append("\",")
+                .append("\"frames\":").append(slot.frameCount).append(',')
+                .append("\"fps\":").append(String.format(Locale.US, "%.1f", slot.fps)).append(',')
+                .append("\"jpegFrames\":").append(slot.jpegCount.get()).append(',')
+                .append("\"jpegAgeMs\":").append(jpegAgeMs).append(',')
+                .append("\"stream\":\"/stream/").append(i).append(".mjpeg\",")
+                .append("\"snapshot\":\"/snapshot/").append(i).append(".jpg\",")
+                .append("\"streamUrl\":\"").append(jsonEscape(mBaseUrl)).append("/stream/")
+                .append(i).append(".mjpeg\",")
+                .append("\"snapshotUrl\":\"").append(jsonEscape(mBaseUrl)).append("/snapshot/")
+                .append(i).append(".jpg\"")
+                .append('}');
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    private String jsonEscape(final String value) {
+        if (value == null) return "";
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    private void sendText(final OutputStream out, final String status, final String contentType,
+        final String body) throws IOException {
+        final byte[] bytes = body.getBytes("UTF-8");
+        writeHeaders(out, status, contentType, bytes.length);
+        out.write(bytes);
+        out.flush();
+    }
+
+    private void writeHeaders(final OutputStream out, final String status, final String contentType,
+        final int contentLength) throws IOException {
+        final String headers = "HTTP/1.1 " + status + "\r\n"
+            + "Content-Type: " + contentType + "\r\n"
+            + "Content-Length: " + contentLength + "\r\n"
+            + "Cache-Control: no-cache\r\n"
+            + "Access-Control-Allow-Origin: *\r\n"
+            + "Connection: close\r\n\r\n";
+        out.write(headers.getBytes("US-ASCII"));
+    }
+
+    private void writeStreamHeaders(final OutputStream out) throws IOException {
+        final String headers = "HTTP/1.1 200 OK\r\n"
+            + "Content-Type: multipart/x-mixed-replace; boundary=" + BOUNDARY + "\r\n"
+            + "Cache-Control: no-cache\r\n"
+            + "Access-Control-Allow-Origin: *\r\n"
+            + "Connection: close\r\n\r\n";
+        out.write(headers.getBytes("US-ASCII"));
+        out.flush();
+    }
+
+    private void writeMjpegFrame(final OutputStream out, final byte[] jpeg) throws IOException {
+        final String headers = "--" + BOUNDARY + "\r\n"
+            + "Content-Type: image/jpeg\r\n"
+            + "Content-Length: " + jpeg.length + "\r\n\r\n";
+        out.write(headers.getBytes("US-ASCII"));
+        out.write(jpeg);
+        out.write("\r\n".getBytes("US-ASCII"));
+        out.flush();
+    }
+
+    private boolean isValidSlot(final int slotIndex) {
+        return slotIndex >= 0 && slotIndex < mSlots.length;
+    }
+
+    private String resolveLocalIpAddress() {
+        try {
+            final Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            while (interfaces.hasMoreElements()) {
+                final NetworkInterface networkInterface = interfaces.nextElement();
+                if (!networkInterface.isUp() || networkInterface.isLoopback()) continue;
+                final Enumeration<InetAddress> addresses = networkInterface.getInetAddresses();
+                while (addresses.hasMoreElements()) {
+                    final InetAddress address = addresses.nextElement();
+                    if (address instanceof Inet4Address && !address.isLoopbackAddress()) {
+                        return address.getHostAddress();
+                    }
+                }
+            }
+        } catch (final Exception e) {
+            Log.w(TAG, "resolveLocalIpAddress failed", e);
+        }
+        return "127.0.0.1";
+    }
+
+    private void closeQuietly(final ServerSocket serverSocket) {
+        if (serverSocket == null) return;
+        try {
+            serverSocket.close();
+        } catch (final IOException ignored) {
+        }
+    }
+
+    private void closeQuietly(final Socket socket) {
+        if (socket == null) return;
+        try {
+            socket.close();
+        } catch (final IOException ignored) {
+        }
+    }
+
+    private void log(final String message) {
+        Log.i(TAG, message);
+        if (mLogSink != null) {
+            mLogSink.log(message);
+        }
+    }
+
+    private static final class SlotState {
+        final int index;
+        final AtomicLong jpegCount = new AtomicLong();
+
+        volatile String status = "EMPTY";
+        volatile String deviceLabel;
+        volatile int width;
+        volatile int height;
+        volatile String formatName;
+        volatile long frameCount;
+        volatile float fps;
+        volatile byte[] latestJpegData;
+        volatile long latestJpegTimestampMs;
+        volatile long lastJpegEncodeMs;
+        volatile long lastJpegErrorLogMs;
+
+        SlotState(final int slotIndex) {
+            index = slotIndex;
+        }
+
+        String shortSummary() {
+            if (!"OPEN".equals(status)) {
+                return "S" + (index + 1) + "=" + status;
+            }
+            final long age = latestJpegTimestampMs > 0
+                ? Math.max(0, System.currentTimeMillis() - latestJpegTimestampMs) : -1;
+            final String health = fps > 0f && age >= 0 && age < 3000 ? "OK" : "CHECK";
+            return String.format(Locale.US, "S%d=%s fps=%.1f jpegAge=%s",
+                index + 1, health, fps, age >= 0 ? Long.toString(age) + "ms" : "none");
+        }
+    }
+}

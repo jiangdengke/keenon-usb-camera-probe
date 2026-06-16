@@ -83,9 +83,13 @@ jobs:
         run: |
           cat > release/RELEASE_NOTES.md <<EOF
           ## 更新内容
-          - 自动构建 Keenon UVC Multi Probe APK
-          - 包含 armeabi-v7a 与 arm64-v8a native 库
-          - 适用于 USB/UVC 多摄像头探针验证
+          - 增加 HTTP MJPEG 多路拉流服务，提供 /cameras、/stream/{slot}.mjpeg 和 /snapshot/{slot}.jpg
+          - 在 App 页面展示机器人局域网访问地址，方便同网段设备直接访问
+          - 增加摄像头运行日志和每路健康状态，便于排查摄像头异常
+
+          ## 验证
+          - GitHub Actions 自动构建 Android debug APK
+          - APK 包含 armeabi-v7a 与 arm64-v8a native 库
 
           ## 安装
           \`\`\`bash
@@ -106,4 +110,5 @@ jobs:
           name: Keenon UVC Multi Probe ${{ github.ref_name }}
           body_path: release/RELEASE_NOTES.md
           files: release/*.apk
+          prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true

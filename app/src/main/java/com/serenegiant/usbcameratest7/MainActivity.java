@@ -39,6 +39,7 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import com.serenegiant.usb.IFrameCallback;
@@ -50,6 +51,7 @@ import com.serenegiant.usb.UVCCamera;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -73,6 +75,8 @@ public final class MainActivity extends Activity {
     private static final int TARGET_WIDTH = 640;
     private static final int TARGET_HEIGHT = 480;
     private static final int USB_CLASS_VIDEO = 14;
+    private static final int STREAM_PORT = 8080;
+    private static final int MAX_LOG_LINES = 160;
     private static final float BANDWIDTH_FACTOR = 0.5f;
 
     private final Handler mUiHandler = new Handler(Looper.getMainLooper());
@@ -81,24 +85,42 @@ public final class MainActivity extends Activity {
     private final Map<String, CameraSlot> mOpenedByDeviceName = new HashMap<String, CameraSlot>();
 
     private USBMonitor mUSBMonitor;
+    private CameraStreamHub mStreamHub;
     private CameraSlot[] mSlots;
     private TextView mStatusText;
+    private TextView mServerText;
+    private TextView mLogText;
+    private ScrollView mLogScroll;
+    private final List<String> mLogLines = new ArrayList<String>();
     private boolean mWaitingForPermission;
     private String mPermissionDeviceName;
     private int mLastUsbCount;
     private int mLastUvcCount;
+    private long mLastHealthLogMs;
 
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(createContentView());
         mUSBMonitor = new USBMonitor(this, mOnDeviceConnectListener);
+        mStreamHub = new CameraStreamHub(MAX_CAMERAS, STREAM_PORT, new CameraStreamHub.LogSink() {
+            @Override
+            public void log(final String message) {
+                addLog(message);
+            }
+        });
+        addLog("App created. HTTP port=" + STREAM_PORT);
     }
 
     @Override
     protected void onStart() {
         super.onStart();
         mUSBMonitor.register();
+        if (mStreamHub != null) {
+            mStreamHub.start();
+        }
+        updateServerInfo();
+        addLog("USB monitor registered");
         mUiHandler.postDelayed(mScanRunnable, 800);
         mUiHandler.postDelayed(mFpsRunnable, 1000);
     }
@@ -108,12 +130,19 @@ public final class MainActivity extends Activity {
         mUiHandler.removeCallbacks(mScanRunnable);
         mUiHandler.removeCallbacks(mFpsRunnable);
         closeAllCameras();
+        if (mStreamHub != null) {
+            mStreamHub.stop();
+        }
         mUSBMonitor.unregister();
         super.onStop();
     }
 
     @Override
     protected void onDestroy() {
+        if (mStreamHub != null) {
+            mStreamHub.stop();
+            mStreamHub = null;
+        }
         if (mUSBMonitor != null) {
             mUSBMonitor.destroy();
             mUSBMonitor = null;
@@ -166,6 +195,15 @@ public final class MainActivity extends Activity {
         root.addView(topBar, new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
+        mServerText = new TextView(this);
+        mServerText.setTextColor(Color.rgb(220, 240, 255));
+        mServerText.setTextSize(12);
+        mServerText.setPadding(dp(8), dp(4), dp(8), dp(4));
+        mServerText.setBackgroundColor(Color.rgb(20, 20, 32));
+        mServerText.setText("LAN access will appear after HTTP server starts");
+        root.addView(mServerText, new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
         final LinearLayout grid = new LinearLayout(this);
         grid.setOrientation(LinearLayout.VERTICAL);
         grid.setPadding(dp(4), 0, dp(4), dp(4));
@@ -186,6 +224,18 @@ public final class MainActivity extends Activity {
                     0, LinearLayout.LayoutParams.MATCH_PARENT, 1));
             }
         }
+
+        mLogScroll = new ScrollView(this);
+        mLogScroll.setBackgroundColor(Color.rgb(8, 8, 8));
+        mLogText = new TextView(this);
+        mLogText.setTextColor(Color.rgb(180, 255, 180));
+        mLogText.setTextSize(10);
+        mLogText.setPadding(dp(8), dp(4), dp(8), dp(4));
+        mLogText.setText("Logs will appear here...");
+        mLogScroll.addView(mLogText, new ScrollView.LayoutParams(
+            ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+        root.addView(mLogScroll, new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(120)));
         return root;
     }
 
@@ -222,8 +272,10 @@ public final class MainActivity extends Activity {
         mLastUvcCount = uvcDevices.size();
 
         Log.i(TAG, "USB devices=" + allDevices.size() + ", UVC candidates=" + uvcDevices.size());
+        addLog("Scan: USB=" + allDevices.size() + " UVC=" + uvcDevices.size());
         for (final UsbDevice device : allDevices) {
             Log.i(TAG, describeDevice(device));
+            addLog("USB: " + describeDevice(device));
         }
 
         for (final UsbDevice device : uvcDevices) {
@@ -236,6 +288,7 @@ public final class MainActivity extends Activity {
             }
             mPermissionQueue.add(device);
             mQueuedDeviceNames.add(deviceName);
+            addLog("Queue permission: " + shortDeviceName(device));
         }
 
         requestNextPermissionIfNeeded();
@@ -253,9 +306,11 @@ public final class MainActivity extends Activity {
         mPermissionDeviceName = device.getDeviceName();
 
         updateStatus("Requesting USB permission for " + shortDeviceName(device));
+        addLog("Request permission: " + shortDeviceName(device));
         final boolean failed = mUSBMonitor.requestPermission(device);
         if (failed) {
             Log.w(TAG, "Failed to request USB permission: " + describeDevice(device));
+            addLog("Request permission failed: " + shortDeviceName(device));
             mWaitingForPermission = false;
             mPermissionDeviceName = null;
             requestNextPermissionIfNeeded();
@@ -266,12 +321,14 @@ public final class MainActivity extends Activity {
         @Override
         public void onAttach(final UsbDevice device) {
             Log.i(TAG, "onAttach: " + describeDevice(device));
+            addLog("USB attached: " + shortDeviceName(device));
             mUiHandler.postDelayed(mScanRunnable, 300);
         }
 
         @Override
         public void onConnect(final UsbDevice device, final UsbControlBlock ctrlBlock, final boolean createNew) {
             Log.i(TAG, "onConnect: " + describeDevice(device));
+            addLog("USB connected: " + shortDeviceName(device));
             mUiHandler.post(new Runnable() {
                 @Override
                 public void run() {
@@ -289,6 +346,7 @@ public final class MainActivity extends Activity {
         @Override
         public void onDisconnect(final UsbDevice device, final UsbControlBlock ctrlBlock) {
             Log.i(TAG, "onDisconnect: " + describeDevice(device));
+            addLog("USB disconnected: " + shortDeviceName(device));
             mUiHandler.post(new Runnable() {
                 @Override
                 public void run() {
@@ -304,11 +362,13 @@ public final class MainActivity extends Activity {
         @Override
         public void onDettach(final UsbDevice device) {
             Log.i(TAG, "onDettach: " + describeDevice(device));
+            addLog("USB detached: " + shortDeviceName(device));
         }
 
         @Override
         public void onCancel(final UsbDevice device) {
             Log.w(TAG, "USB permission canceled: " + (device != null ? describeDevice(device) : "null"));
+            addLog("USB permission canceled: " + (device != null ? shortDeviceName(device) : "null"));
             mUiHandler.post(new Runnable() {
                 @Override
                 public void run() {
@@ -344,9 +404,9 @@ public final class MainActivity extends Activity {
             if (slot.texture.getSurfaceTexture() != null) {
                 slot.texture.getSurfaceTexture().setDefaultBufferSize(preview.width, preview.height);
             }
-            camera.setPreviewDisplay(slot.surface);
-            camera.setFrameCallback(slot.frameCallback, UVCCamera.PIXEL_FORMAT_NV21);
-            camera.startPreview();
+        camera.setPreviewDisplay(slot.surface);
+        camera.setFrameCallback(slot.frameCallback, UVCCamera.PIXEL_FORMAT_NV21);
+        camera.startPreview();
 
             slot.device = device;
             slot.camera = camera;
@@ -356,25 +416,35 @@ public final class MainActivity extends Activity {
             slot.frameCount.set(0);
             slot.lastFrameCount = 0;
             slot.lastFpsTimestampMs = System.currentTimeMillis();
-            slot.refreshLabel();
-            mOpenedByDeviceName.put(device.getDeviceName(), slot);
+        slot.refreshLabel();
+        mOpenedByDeviceName.put(device.getDeviceName(), slot);
+        if (mStreamHub != null) {
+            mStreamHub.onSlotOpened(slot.index, shortDeviceName(device), preview.width,
+                preview.height, preview.formatName());
+        }
 
-            Log.i(TAG, "Opened slot " + (slot.index + 1) + ": " + describeDevice(device));
-            Log.i(TAG, "Supported sizes slot " + (slot.index + 1) + ": " + supportedSize);
-            updateStatus("Opened " + shortDeviceName(device));
-        } catch (final Exception e) {
-            Log.e(TAG, "Failed to open camera: " + describeDevice(device), e);
-            if (camera != null) {
-                try {
-                    camera.destroy();
+        Log.i(TAG, "Opened slot " + (slot.index + 1) + ": " + describeDevice(device));
+        Log.i(TAG, "Supported sizes slot " + (slot.index + 1) + ": " + supportedSize);
+        addLog("Opened slot " + (slot.index + 1) + ": " + shortDeviceName(device)
+            + " " + preview.width + "x" + preview.height + " " + preview.formatName());
+        updateStatus("Opened " + shortDeviceName(device));
+    } catch (final Exception e) {
+        Log.e(TAG, "Failed to open camera: " + describeDevice(device), e);
+        addLog("Open failed: " + shortDeviceName(device) + " err=" + e.getMessage());
+        if (camera != null) {
+            try {
+                camera.destroy();
                 } catch (final Exception ignored) {
                 }
-            }
-            slot.status = "OPEN FAILED: " + e.getMessage();
-            slot.refreshLabel();
-            updateStatus("Open failed. See logcat tag " + TAG);
         }
+        slot.status = "OPEN FAILED: " + e.getMessage();
+        if (mStreamHub != null) {
+            mStreamHub.onSlotClosed(slot.index, slot.status);
+        }
+        slot.refreshLabel();
+        updateStatus("Open failed. See logcat tag " + TAG);
     }
+}
 
     private void setPreviewSize(final UVCCamera camera, final PreviewChoice preview) {
         try {
@@ -516,7 +586,63 @@ public final class MainActivity extends Activity {
         if (mWaitingForPermission) {
             sb.append(" waitingPermission");
         }
+        if (mStreamHub != null && mStreamHub.isRunning()) {
+            sb.append(" | HTTP ").append(mStreamHub.getBaseUrl())
+                .append(" /cameras");
+        }
         mStatusText.setText(sb.toString());
+        updateServerInfo();
+        final long now = System.currentTimeMillis();
+        if (mStreamHub != null && prefix == null && now - mLastHealthLogMs > 5000) {
+            mLastHealthLogMs = now;
+            addLog(mStreamHub.buildHealthSummary());
+        }
+    }
+
+    private void updateServerInfo() {
+        if (mServerText == null) return;
+        if (mStreamHub != null && mStreamHub.isRunning()) {
+            final String baseUrl = mStreamHub.getBaseUrl();
+            mServerText.setText("LAN access: " + baseUrl
+                + "\nCameras: " + baseUrl + "/cameras"
+                + " | Stream0: " + baseUrl + "/stream/0.mjpeg"
+                + " | Stream1: " + baseUrl + "/stream/1.mjpeg");
+        } else {
+            mServerText.setText("HTTP server stopped. Keep app open to stream cameras.");
+        }
+    }
+
+    private void addLog(final String message) {
+        if (message == null || message.length() == 0) return;
+        Log.i(TAG, message);
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mUiHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    addLog(message);
+                }
+            });
+            return;
+        }
+        final String line = String.format(Locale.US, "%1$tH:%1$tM:%1$tS %2$s", new Date(), message);
+        mLogLines.add(line);
+        while (mLogLines.size() > MAX_LOG_LINES) {
+            mLogLines.remove(0);
+        }
+        if (mLogText == null) return;
+        final StringBuilder sb = new StringBuilder();
+        for (final String logLine : mLogLines) {
+            sb.append(logLine).append('\n');
+        }
+        mLogText.setText(sb.toString());
+        if (mLogScroll != null) {
+            mLogScroll.post(new Runnable() {
+                @Override
+                public void run() {
+                    mLogScroll.fullScroll(View.FOCUS_DOWN);
+                }
+            });
+        }
     }
 
     private int dp(final int value) {
@@ -553,6 +679,9 @@ public final class MainActivity extends Activity {
                 public void onSurfaceTextureAvailable(final SurfaceTexture surfaceTexture, final int width, final int height) {
                     surface = new Surface(surfaceTexture);
                     status = "READY";
+                    if (mStreamHub != null) {
+                        mStreamHub.onSlotReady(index);
+                    }
                     refreshLabel();
                 }
 
@@ -568,6 +697,9 @@ public final class MainActivity extends Activity {
                         surface = null;
                     }
                     status = "SURFACE DESTROYED";
+                    if (mStreamHub != null) {
+                        mStreamHub.onSlotClosed(index, status);
+                    }
                     refreshLabel();
                     return true;
                 }
@@ -591,6 +723,10 @@ public final class MainActivity extends Activity {
                 @Override
                 public void onFrame(final ByteBuffer frame) {
                     frameCount.incrementAndGet();
+                    final PreviewChoice currentPreview = preview;
+                    if (mStreamHub != null && currentPreview != null) {
+                        mStreamHub.onFrame(index, frame, currentPreview.width, currentPreview.height);
+                    }
                 }
             };
             refreshLabel();
@@ -609,6 +745,9 @@ public final class MainActivity extends Activity {
             }
             lastFrameCount = frames;
             lastFpsTimestampMs = now;
+            if (mStreamHub != null) {
+                mStreamHub.onSlotFps(index, status, frames, fps);
+            }
             refreshLabel();
         }
 
@@ -625,6 +764,9 @@ public final class MainActivity extends Activity {
             }
             sb.append("\nframes=").append(frameCount.get())
                 .append(" fps=").append(String.format(Locale.US, "%.1f", fps));
+            if (mStreamHub != null) {
+                sb.append(mStreamHub.getSlotLabelExtra(index));
+            }
             label.setText(sb.toString());
         }
 
@@ -641,8 +783,12 @@ public final class MainActivity extends Activity {
             frameCount.set(0);
             lastFrameCount = 0;
             status = surface != null ? "READY" : "EMPTY";
+            if (mStreamHub != null) {
+                mStreamHub.onSlotClosed(index, status);
+            }
 
             if (cameraToClose != null) {
+                addLog("Closing slot " + (index + 1));
                 try {
                     cameraToClose.setFrameCallback(null, 0);
                     cameraToClose.stopPreview();
