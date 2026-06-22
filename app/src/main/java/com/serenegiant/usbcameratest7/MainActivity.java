@@ -63,7 +63,7 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Probe app for Keenon/Peanut robots whose cameras are exposed as USB UVC devices.
  *
- * The app opens up to four UVC cameras at the same time, shows a preview for every
+ * The app opens up to eight UVC cameras at the same time, shows a preview for every
  * opened device, and registers a frame callback for every camera. If several tiles
  * show non-zero FPS at the same time, the robot can provide multiple video streams
  * concurrently and we can add RTSP/WebRTC/MJPEG output on top of this proof.
@@ -71,7 +71,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class MainActivity extends Activity {
     private static final String TAG = "KeenonUvcProbe";
 
-    private static final int MAX_CAMERAS = 4;
+    private static final int MAX_CAMERAS = 8;
     private static final int TARGET_WIDTH = 640;
     private static final int TARGET_HEIGHT = 480;
     private static final int USB_CLASS_VIDEO = 14;
@@ -211,7 +211,7 @@ public final class MainActivity extends Activity {
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
 
         mSlots = new CameraSlot[MAX_CAMERAS];
-        for (int row = 0; row < 2; row++) {
+        for (int row = 0; row < 4; row++) {
             final LinearLayout rowLayout = new LinearLayout(this);
             rowLayout.setOrientation(LinearLayout.HORIZONTAL);
             grid.addView(rowLayout, new LinearLayout.LayoutParams(
