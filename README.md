@@ -8,8 +8,8 @@
 - App 名称：`Keenon UVC Multi Probe`。
 - 包名：`com.serenegiant.usbcameratest7`。
 - 启动后自动扫描 USB 设备，筛选 UVC 摄像头。
-- 最多同时打开 8 路 UVC 摄像头。
-- UI 是 4x2 预览网格，每个格子显示：
+- 检测到几路 UVC 摄像头就显示几路，默认最多同时打开 8 路。
+- UI 会自动生成预览网格，1 路显示 1 个格子，2 路及以上按 2 列递增排列，每个格子显示：
   - slot 状态
   - 预览分辨率和格式
   - USB VID/PID
@@ -139,8 +139,10 @@ Workflow 会执行：
 1. App 顶部状态显示类似：
 
    ```text
-   USB=8 UVC=8 opened=8/8 pending=0
+   USB=3 UVC=3 opened=3/3 max=8 pending=0
    ```
+
+   如果接满 8 路，则状态会接近 `USB=8 UVC=8 opened=8/8 max=8 pending=0`。
 
 2. 至少两个 slot 同时显示预览画面。
 

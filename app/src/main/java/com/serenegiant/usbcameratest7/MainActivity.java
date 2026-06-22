@@ -63,15 +63,17 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Probe app for Keenon/Peanut robots whose cameras are exposed as USB UVC devices.
  *
- * The app opens up to eight UVC cameras at the same time, shows a preview for every
- * opened device, and registers a frame callback for every camera. If several tiles
- * show non-zero FPS at the same time, the robot can provide multiple video streams
- * concurrently and we can add RTSP/WebRTC/MJPEG output on top of this proof.
+ * The app opens up to the detected UVC camera count, capped at eight cameras,
+ * shows a preview for every opened device, and registers a frame callback for
+ * every camera. If several tiles show non-zero FPS at the same time, the robot
+ * can provide multiple video streams concurrently and we can add RTSP/WebRTC/MJPEG
+ * output on top of this proof.
  */
 public final class MainActivity extends Activity {
     private static final String TAG = "KeenonUvcProbe";
 
     private static final int MAX_CAMERAS = 8;
+    private static final int GRID_COLUMNS = 2;
     private static final int TARGET_WIDTH = 640;
     private static final int TARGET_HEIGHT = 480;
     private static final int USB_CLASS_VIDEO = 14;
@@ -89,6 +91,8 @@ public final class MainActivity extends Activity {
     private CameraSlot[] mSlots;
     private TextView mStatusText;
     private TextView mServerText;
+    private LinearLayout mSlotGrid;
+    private LinearLayout[] mSlotRows;
     private TextView mLogText;
     private ScrollView mLogScroll;
     private final List<String> mLogLines = new ArrayList<String>();
@@ -96,6 +100,7 @@ public final class MainActivity extends Activity {
     private String mPermissionDeviceName;
     private int mLastUsbCount;
     private int mLastUvcCount;
+    private int mVisibleSlotCount;
     private long mLastHealthLogMs;
 
     @Override
@@ -204,26 +209,28 @@ public final class MainActivity extends Activity {
         root.addView(mServerText, new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
-        final LinearLayout grid = new LinearLayout(this);
-        grid.setOrientation(LinearLayout.VERTICAL);
-        grid.setPadding(dp(4), 0, dp(4), dp(4));
-        root.addView(grid, new LinearLayout.LayoutParams(
+        mSlotGrid = new LinearLayout(this);
+        mSlotGrid.setOrientation(LinearLayout.VERTICAL);
+        mSlotGrid.setPadding(dp(4), 0, dp(4), dp(4));
+        root.addView(mSlotGrid, new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
 
         mSlots = new CameraSlot[MAX_CAMERAS];
-        for (int row = 0; row < 4; row++) {
-            final LinearLayout rowLayout = new LinearLayout(this);
-            rowLayout.setOrientation(LinearLayout.HORIZONTAL);
-            grid.addView(rowLayout, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
-            for (int col = 0; col < 2; col++) {
-                final int index = row * 2 + col;
-                final CameraSlot slot = new CameraSlot(index);
-                mSlots[index] = slot;
-                rowLayout.addView(slot.container, new LinearLayout.LayoutParams(
-                    0, LinearLayout.LayoutParams.MATCH_PARENT, 1));
+        final int rowCount = (MAX_CAMERAS + GRID_COLUMNS - 1) / GRID_COLUMNS;
+        mSlotRows = new LinearLayout[rowCount];
+        for (int i = 0; i < MAX_CAMERAS; i++) {
+            if (i % GRID_COLUMNS == 0) {
+                final LinearLayout rowLayout = new LinearLayout(this);
+                rowLayout.setOrientation(LinearLayout.HORIZONTAL);
+                mSlotRows[i / GRID_COLUMNS] = rowLayout;
+                mSlotGrid.addView(rowLayout, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
             }
+            mSlots[i] = new CameraSlot(i);
+            mSlotRows[i / GRID_COLUMNS].addView(mSlots[i].container, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1));
         }
+        updateVisibleSlots(0);
 
         mLogScroll = new ScrollView(this);
         mLogScroll.setBackgroundColor(Color.rgb(8, 8, 8));
@@ -239,6 +246,48 @@ public final class MainActivity extends Activity {
         return root;
     }
 
+    private void updateVisibleSlots(final int requestedSlotCount) {
+        final int slotCount = Math.max(0, Math.min(requestedSlotCount, MAX_CAMERAS));
+        if (mSlotRows == null || mSlots == null) return;
+        if (slotCount == mVisibleSlotCount) {
+            if (mStreamHub != null) {
+                mStreamHub.setActiveSlotCount(slotCount);
+            }
+            return;
+        }
+
+        for (int i = slotCount; i < mVisibleSlotCount; i++) {
+            mSlots[i].closeCamera();
+        }
+
+        mVisibleSlotCount = slotCount;
+        if (mStreamHub != null) {
+            mStreamHub.setActiveSlotCount(mVisibleSlotCount);
+        }
+        trimPermissionQueueToVisibleSlots();
+
+        for (int row = 0; row < mSlotRows.length; row++) {
+            final int rowStart = row * GRID_COLUMNS;
+            mSlotRows[row].setVisibility(rowStart < mVisibleSlotCount ? View.VISIBLE : View.GONE);
+            for (int col = 0; col < GRID_COLUMNS; col++) {
+                final int index = rowStart + col;
+                if (index < mSlots.length) {
+                    mSlots[index].container.setVisibility(index < mVisibleSlotCount ? View.VISIBLE : View.GONE);
+                }
+            }
+        }
+    }
+
+    private void trimPermissionQueueToVisibleSlots() {
+        final int waitingCount = mPermissionDeviceName != null ? 1 : 0;
+        final int allowedQueued = Math.max(0,
+            mVisibleSlotCount - mOpenedByDeviceName.size() - waitingCount);
+        while (mPermissionQueue.size() > allowedQueued) {
+            final UsbDevice removed = mPermissionQueue.remove(mPermissionQueue.size() - 1);
+            mQueuedDeviceNames.remove(removed.getDeviceName());
+        }
+    }
+
     private final Runnable mScanRunnable = new Runnable() {
         @Override
         public void run() {
@@ -249,8 +298,8 @@ public final class MainActivity extends Activity {
     private final Runnable mFpsRunnable = new Runnable() {
         @Override
         public void run() {
-            for (final CameraSlot slot : mSlots) {
-                slot.refreshFps();
+            for (int i = 0; i < mVisibleSlotCount; i++) {
+                mSlots[i].refreshFps();
             }
             updateStatus(null);
             mUiHandler.postDelayed(this, 1000);
@@ -270,6 +319,7 @@ public final class MainActivity extends Activity {
 
         mLastUsbCount = allDevices.size();
         mLastUvcCount = uvcDevices.size();
+        updateVisibleSlots(Math.min(mLastUvcCount, MAX_CAMERAS));
 
         Log.i(TAG, "USB devices=" + allDevices.size() + ", UVC candidates=" + uvcDevices.size());
         addLog("Scan: USB=" + allDevices.size() + " UVC=" + uvcDevices.size());
@@ -278,8 +328,11 @@ public final class MainActivity extends Activity {
             addLog("USB: " + describeDevice(device));
         }
 
+        int queuedOrOpened = mOpenedByDeviceName.size() + mPermissionQueue.size()
+            + (mPermissionDeviceName != null ? 1 : 0);
         for (final UsbDevice device : uvcDevices) {
-            if (!hasFreeReadySlot()) break;
+            if (!hasFreeSlot()) break;
+            if (queuedOrOpened >= mVisibleSlotCount) break;
             final String deviceName = device.getDeviceName();
             if (mOpenedByDeviceName.containsKey(deviceName)
                 || mQueuedDeviceNames.contains(deviceName)
@@ -288,6 +341,7 @@ public final class MainActivity extends Activity {
             }
             mPermissionQueue.add(device);
             mQueuedDeviceNames.add(deviceName);
+            queuedOrOpened++;
             addLog("Queue permission: " + shortDeviceName(device));
         }
 
@@ -505,8 +559,18 @@ public final class MainActivity extends Activity {
         return findFreeReadySlot() != null;
     }
 
+    private boolean hasFreeSlot() {
+        for (int i = 0; i < mVisibleSlotCount; i++) {
+            if (mSlots[i].isFree()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private CameraSlot findFreeReadySlot() {
-        for (final CameraSlot slot : mSlots) {
+        for (int i = 0; i < mVisibleSlotCount; i++) {
+            final CameraSlot slot = mSlots[i];
             if (slot.isFree() && slot.surface != null) {
                 return slot;
             }
@@ -581,7 +645,8 @@ public final class MainActivity extends Activity {
         sb.append("USB=").append(mLastUsbCount)
             .append(" UVC=").append(mLastUvcCount)
             .append(" opened=").append(mOpenedByDeviceName.size())
-            .append("/").append(MAX_CAMERAS)
+            .append("/").append(mVisibleSlotCount)
+            .append(" max=").append(MAX_CAMERAS)
             .append(" pending=").append(mPermissionQueue.size());
         if (mWaitingForPermission) {
             sb.append(" waitingPermission");
@@ -683,6 +748,7 @@ public final class MainActivity extends Activity {
                         mStreamHub.onSlotReady(index);
                     }
                     refreshLabel();
+                    requestNextPermissionIfNeeded();
                 }
 
                 @Override

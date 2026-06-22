@@ -44,6 +44,7 @@ final class CameraStreamHub {
     private ExecutorService mClientExecutor;
     private Thread mAcceptThread;
     private volatile boolean mRunning;
+    private volatile int mActiveSlotCount;
     private volatile String mBaseUrl;
 
     CameraStreamHub(final int slotCount, final int port, final LogSink logSink) {
@@ -100,6 +101,10 @@ final class CameraStreamHub {
         return mBaseUrl;
     }
 
+    void setActiveSlotCount(final int activeSlotCount) {
+        mActiveSlotCount = Math.max(0, Math.min(activeSlotCount, mSlots.length));
+    }
+
     String getStreamUrl(final int slotIndex) {
         return mBaseUrl + "/stream/" + slotIndex + ".mjpeg";
     }
@@ -122,7 +127,8 @@ final class CameraStreamHub {
 
     String buildHealthSummary() {
         final StringBuilder sb = new StringBuilder("Health:");
-        for (final SlotState slot : mSlots) {
+        for (int i = 0; i < mActiveSlotCount; i++) {
+            final SlotState slot = mSlots[i];
             sb.append(' ').append(slot.shortSummary());
         }
         return sb.toString();
@@ -325,7 +331,7 @@ final class CameraStreamHub {
         sb.append("Keenon UVC Multi Probe\n");
         sb.append("Base URL: ").append(mBaseUrl).append("\n");
         sb.append("GET ").append(mBaseUrl).append("/cameras\n");
-        for (int i = 0; i < mSlots.length; i++) {
+        for (int i = 0; i < mActiveSlotCount; i++) {
             sb.append("GET ").append(mBaseUrl).append("/stream/").append(i).append(".mjpeg\n");
             sb.append("GET ").append(mBaseUrl).append("/snapshot/").append(i).append(".jpg\n");
         }
@@ -338,7 +344,7 @@ final class CameraStreamHub {
         sb.append('{');
         sb.append("\"baseUrl\":\"").append(jsonEscape(mBaseUrl)).append("\",");
         sb.append("\"cameras\":[");
-        for (int i = 0; i < mSlots.length; i++) {
+        for (int i = 0; i < mActiveSlotCount; i++) {
             if (i > 0) sb.append(',');
             final SlotState slot = mSlots[i];
             final long jpegAgeMs = slot.latestJpegTimestampMs > 0 ? now - slot.latestJpegTimestampMs : -1;
@@ -410,7 +416,7 @@ final class CameraStreamHub {
     }
 
     private boolean isValidSlot(final int slotIndex) {
-        return slotIndex >= 0 && slotIndex < mSlots.length;
+        return slotIndex >= 0 && slotIndex < mActiveSlotCount;
     }
 
     private String resolveLocalIpAddress() {
