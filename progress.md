@@ -53,3 +53,22 @@
 - `docs/eight-camera-probe.md`: documented the Chinese log toggle and localized field logs.
 - `progress.md`: appended this implementation and verification record.
 - Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.
+
+## 2026-06-22 - Task: Prefer low-resolution UVC preview
+
+### What was done
+- Changed camera opening to choose 640x480 or lower supported preview sizes first, reducing USB bandwidth pressure when several UVC cameras run together.
+- Kept a safe fallback for cameras that only advertise higher resolutions by choosing that camera's smallest supported preview size.
+- Added Chinese in-app log text that shows the selected resolution and whether the app had to fall back to a higher minimum resolution.
+- Updated documentation to explain the low-resolution preference and how to read the log when one route still has no video.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Checked IDE diagnostics for `MainActivity.java`; no diagnostics were reported.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: changed preview-size selection to compare MJPEG/YUYV candidates together, prefer 640x480-or-lower choices, and log the selected resolution per slot.
+- `README.md`: documented the low-resolution opening behavior and updated the troubleshooting guidance for one missing route.
+- `docs/eight-camera-probe.md`: documented the bandwidth-reduction behavior and the log line to check when a route still has no video.
+- `progress.md`: appended this implementation and verification record.
+- Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.

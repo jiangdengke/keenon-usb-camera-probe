@@ -7,6 +7,8 @@ The probe app now shows the detected USB UVC camera count, capped at 8 cameras.
 - The app scans USB devices and displays one preview slot per detected UVC camera.
 - The safety cap remains 8 cameras; extra UVC devices are not opened.
 - The top bar has a Chinese log toggle next to scan and close controls.
+- Each camera open first prefers 640x480 or lower supported preview sizes to reduce USB bandwidth pressure across multiple cameras.
+- If a camera only advertises higher resolutions, the app uses that camera's smallest supported size and logs the selected size in Chinese.
 - The preview area is generated dynamically: 1 camera uses one tile, 2 or more cameras use 2 columns.
 - Each active slot exposes an MJPEG endpoint with the same index pattern:
 
@@ -34,6 +36,8 @@ USB=8 UVC=8 opened=8/8 max=8 pending=0
 ```
 
 Actual stability still depends on robot USB bandwidth, hub power, camera format, and UVC driver support.
+
+When one route still has no video, open `显示日志` and check the selected size line for that slot. A line that says the app did not find 640x480 or lower means that camera is still using a higher minimum resolution, so USB bandwidth may remain the bottleneck.
 
 ## On-device logs
 

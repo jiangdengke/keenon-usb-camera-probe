@@ -490,13 +490,16 @@ public final class MainActivity extends Activity {
             final String supportedSize = camera.getSupportedSize();
             final PreviewChoice preview = choosePreviewSize(supportedSize);
             setPreviewSize(camera, preview);
+            addLog("第" + (slot.index + 1) + "路优先低分辨率：选用 "
+                + preview.width + "x" + preview.height + " " + preview.formatName()
+                + "，" + previewSelectionReason(preview));
 
             if (slot.texture.getSurfaceTexture() != null) {
                 slot.texture.getSurfaceTexture().setDefaultBufferSize(preview.width, preview.height);
             }
-        camera.setPreviewDisplay(slot.surface);
-        camera.setFrameCallback(slot.frameCallback, UVCCamera.PIXEL_FORMAT_NV21);
-        camera.startPreview();
+            camera.setPreviewDisplay(slot.surface);
+            camera.setFrameCallback(slot.frameCallback, UVCCamera.PIXEL_FORMAT_NV21);
+            camera.startPreview();
 
             slot.device = device;
             slot.camera = camera;
@@ -506,35 +509,35 @@ public final class MainActivity extends Activity {
             slot.frameCount.set(0);
             slot.lastFrameCount = 0;
             slot.lastFpsTimestampMs = System.currentTimeMillis();
-        slot.refreshLabel();
-        mOpenedByDeviceName.put(device.getDeviceName(), slot);
-        if (mStreamHub != null) {
-            mStreamHub.onSlotOpened(slot.index, shortDeviceName(device), preview.width,
-                preview.height, preview.formatName());
-        }
+            slot.refreshLabel();
+            mOpenedByDeviceName.put(device.getDeviceName(), slot);
+            if (mStreamHub != null) {
+                mStreamHub.onSlotOpened(slot.index, shortDeviceName(device), preview.width,
+                    preview.height, preview.formatName());
+            }
 
-        Log.i(TAG, "Opened slot " + (slot.index + 1) + ": " + describeDevice(device));
-        Log.i(TAG, "Supported sizes slot " + (slot.index + 1) + ": " + supportedSize);
-        addLog("已打开第" + (slot.index + 1) + "路：" + shortDeviceName(device)
-            + " " + preview.width + "x" + preview.height + " " + preview.formatName());
-        updateStatus("已打开摄像头：" + shortDeviceName(device));
-    } catch (final Exception e) {
-        Log.e(TAG, "Failed to open camera: " + describeDevice(device), e);
-        addLog("打开失败：" + shortDeviceName(device) + "，原因=" + e.getMessage());
-        if (camera != null) {
-            try {
-                camera.destroy();
+            Log.i(TAG, "Opened slot " + (slot.index + 1) + ": " + describeDevice(device));
+            Log.i(TAG, "Supported sizes slot " + (slot.index + 1) + ": " + supportedSize);
+            addLog("已打开第" + (slot.index + 1) + "路：" + shortDeviceName(device)
+                + " " + preview.width + "x" + preview.height + " " + preview.formatName());
+            updateStatus("已打开摄像头：" + shortDeviceName(device));
+        } catch (final Exception e) {
+            Log.e(TAG, "Failed to open camera: " + describeDevice(device), e);
+            addLog("打开失败：" + shortDeviceName(device) + "，原因=" + e.getMessage());
+            if (camera != null) {
+                try {
+                    camera.destroy();
                 } catch (final Exception ignored) {
                 }
+            }
+            slot.status = "OPEN FAILED: " + e.getMessage();
+            if (mStreamHub != null) {
+                mStreamHub.onSlotClosed(slot.index, slot.status);
+            }
+            slot.refreshLabel();
+            updateStatus("打开失败，请点“显示日志”查看原因");
         }
-        slot.status = "OPEN FAILED: " + e.getMessage();
-        if (mStreamHub != null) {
-            mStreamHub.onSlotClosed(slot.index, slot.status);
-        }
-        slot.refreshLabel();
-        updateStatus("打开失败，请点“显示日志”查看原因");
     }
-}
 
     private void setPreviewSize(final UVCCamera camera, final PreviewChoice preview) {
         try {
@@ -551,44 +554,77 @@ public final class MainActivity extends Activity {
     }
 
     private PreviewChoice choosePreviewSize(final String supportedSizeJson) {
+        final List<PreviewChoice> candidates = new ArrayList<PreviewChoice>();
         final List<Size> mjpegSizes = UVCCamera.getSupportedSize(6, supportedSizeJson);
-        final Size mjpeg = chooseSize(mjpegSizes);
-        if (mjpeg != null) {
-            return new PreviewChoice(mjpeg.width, mjpeg.height, UVCCamera.FRAME_FORMAT_MJPEG);
-        }
+        addPreviewCandidates(candidates, mjpegSizes, UVCCamera.FRAME_FORMAT_MJPEG);
 
         final List<Size> yuyvSizes = UVCCamera.getSupportedSize(4, supportedSizeJson);
-        final Size yuyv = chooseSize(yuyvSizes);
-        if (yuyv != null) {
-            return new PreviewChoice(yuyv.width, yuyv.height, UVCCamera.FRAME_FORMAT_YUYV);
+        addPreviewCandidates(candidates, yuyvSizes, UVCCamera.FRAME_FORMAT_YUYV);
+
+        final PreviewChoice preview = choosePreviewCandidate(candidates);
+        if (preview != null) {
+            return preview;
         }
 
         return new PreviewChoice(TARGET_WIDTH, TARGET_HEIGHT, UVCCamera.FRAME_FORMAT_MJPEG);
     }
 
-    private Size chooseSize(final List<Size> sizes) {
-        if (sizes == null || sizes.isEmpty()) return null;
-
-        Size bestUnderTarget = null;
-        Size smallest = null;
+    private void addPreviewCandidates(final List<PreviewChoice> candidates, final List<Size> sizes,
+        final int format) {
+        if (sizes == null) return;
         for (final Size size : sizes) {
-            if (size.width == TARGET_WIDTH && size.height == TARGET_HEIGHT) {
-                return size;
+            candidates.add(new PreviewChoice(size.width, size.height, format));
+        }
+    }
+
+    private PreviewChoice choosePreviewCandidate(final List<PreviewChoice> candidates) {
+        if (candidates == null || candidates.isEmpty()) return null;
+
+        PreviewChoice bestUnderTarget = null;
+        PreviewChoice smallest = null;
+        for (final PreviewChoice candidate : candidates) {
+            if (candidate.width == TARGET_WIDTH && candidate.height == TARGET_HEIGHT) {
+                return candidate;
             }
-            if (smallest == null || area(size) < area(smallest)) {
-                smallest = size;
+            if (isBetterSmallest(candidate, smallest)) {
+                smallest = candidate;
             }
-            if (size.width <= TARGET_WIDTH && size.height <= TARGET_HEIGHT) {
-                if (bestUnderTarget == null || area(size) > area(bestUnderTarget)) {
-                    bestUnderTarget = size;
+            if (candidate.width <= TARGET_WIDTH && candidate.height <= TARGET_HEIGHT) {
+                if (isBetterUnderTarget(candidate, bestUnderTarget)) {
+                    bestUnderTarget = candidate;
                 }
             }
         }
         return bestUnderTarget != null ? bestUnderTarget : smallest;
     }
 
-    private int area(final Size size) {
-        return size.width * size.height;
+    private boolean isBetterSmallest(final PreviewChoice candidate, final PreviewChoice current) {
+        if (current == null) return true;
+        final int candidateArea = area(candidate);
+        final int currentArea = area(current);
+        if (candidateArea != currentArea) return candidateArea < currentArea;
+        return candidate.format == UVCCamera.FRAME_FORMAT_MJPEG
+            && current.format != UVCCamera.FRAME_FORMAT_MJPEG;
+    }
+
+    private boolean isBetterUnderTarget(final PreviewChoice candidate, final PreviewChoice current) {
+        if (current == null) return true;
+        final int candidateArea = area(candidate);
+        final int currentArea = area(current);
+        if (candidateArea != currentArea) return candidateArea > currentArea;
+        return candidate.format == UVCCamera.FRAME_FORMAT_MJPEG
+            && current.format != UVCCamera.FRAME_FORMAT_MJPEG;
+    }
+
+    private String previewSelectionReason(final PreviewChoice preview) {
+        if (preview.width <= TARGET_WIDTH && preview.height <= TARGET_HEIGHT) {
+            return "降低带宽压力";
+        }
+        return "未找到640x480及以下，使用最小支持分辨率";
+    }
+
+    private int area(final PreviewChoice preview) {
+        return preview.width * preview.height;
     }
 
     private boolean hasFreeReadySlot() {
