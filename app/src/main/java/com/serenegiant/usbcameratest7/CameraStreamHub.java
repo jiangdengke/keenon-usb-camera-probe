@@ -72,12 +72,12 @@ final class CameraStreamHub {
                 }
             }, "KeenonMjpegAccept");
             mAcceptThread.start();
-            log("HTTP MJPEG server started: " + mBaseUrl);
+            log("HTTP拉流服务已启动：" + mBaseUrl);
         } catch (final IOException e) {
             mRunning = false;
             closeQuietly(mServerSocket);
             mServerSocket = null;
-            log("HTTP MJPEG server failed: " + e.getMessage());
+            log("HTTP拉流服务启动失败：" + e.getMessage());
         }
     }
 
@@ -90,7 +90,7 @@ final class CameraStreamHub {
             mClientExecutor.shutdownNow();
             mClientExecutor = null;
         }
-        log("HTTP MJPEG server stopped");
+        log("HTTP拉流服务已停止");
     }
 
     boolean isRunning() {
@@ -115,18 +115,18 @@ final class CameraStreamHub {
         final long jpegAge = slot.latestJpegTimestampMs > 0
             ? Math.max(0, System.currentTimeMillis() - slot.latestJpegTimestampMs) : -1;
         final StringBuilder sb = new StringBuilder();
-        sb.append("\nstream=/stream/").append(slotIndex).append(".mjpeg");
-        sb.append("\njpeg=").append(slot.jpegCount.get());
+        sb.append("\n拉流=/stream/").append(slotIndex).append(".mjpeg");
+        sb.append("\nJPEG帧=").append(slot.jpegCount.get());
         if (jpegAge >= 0) {
-            sb.append(" age=").append(jpegAge).append("ms");
+            sb.append(" 延迟=").append(jpegAge).append("ms");
         } else {
-            sb.append(" age=none");
+            sb.append(" 延迟=暂无");
         }
         return sb.toString();
     }
 
     String buildHealthSummary() {
-        final StringBuilder sb = new StringBuilder("Health:");
+        final StringBuilder sb = new StringBuilder("健康状态：");
         for (int i = 0; i < mActiveSlotCount; i++) {
             final SlotState slot = mSlots[i];
             sb.append(' ').append(slot.shortSummary());
@@ -152,7 +152,7 @@ final class CameraStreamHub {
         slot.latestJpegData = null;
         slot.latestJpegTimestampMs = 0;
         slot.jpegCount.set(0);
-        log("Slot " + (slotIndex + 1) + " stream ready: " + getStreamUrl(slotIndex));
+        log("第" + (slotIndex + 1) + "路拉流已就绪：" + getStreamUrl(slotIndex));
     }
 
     void onSlotClosed(final int slotIndex, final String status) {
@@ -204,7 +204,7 @@ final class CameraStreamHub {
         } catch (final Exception e) {
             if (now - slot.lastJpegErrorLogMs > 5000) {
                 slot.lastJpegErrorLogMs = now;
-                log("Slot " + (slotIndex + 1) + " JPEG encode failed: " + e.getMessage());
+                log("第" + (slotIndex + 1) + "路JPEG编码失败：" + e.getMessage());
             }
         }
     }
@@ -226,7 +226,7 @@ final class CameraStreamHub {
                 }
             } catch (final IOException e) {
                 if (mRunning) {
-                    log("HTTP accept failed: " + e.getMessage());
+                    log("HTTP客户端接入失败：" + e.getMessage());
                 }
             }
         }
@@ -296,7 +296,7 @@ final class CameraStreamHub {
             return;
         }
         final SlotState slot = mSlots[slotIndex];
-        log("MJPEG client connected: slot " + (slotIndex + 1) + " from "
+        log("MJPEG客户端已连接：第" + (slotIndex + 1) + "路，来源="
             + socket.getInetAddress().getHostAddress());
         writeStreamHeaders(out);
 
@@ -484,13 +484,23 @@ final class CameraStreamHub {
 
         String shortSummary() {
             if (!"OPEN".equals(status)) {
-                return "S" + (index + 1) + "=" + status;
+                return "第" + (index + 1) + "路=" + displayStatus(status);
             }
             final long age = latestJpegTimestampMs > 0
                 ? Math.max(0, System.currentTimeMillis() - latestJpegTimestampMs) : -1;
-            final String health = fps > 0f && age >= 0 && age < 3000 ? "OK" : "CHECK";
-            return String.format(Locale.US, "S%d=%s fps=%.1f jpegAge=%s",
-                index + 1, health, fps, age >= 0 ? Long.toString(age) + "ms" : "none");
+            final String health = fps > 0f && age >= 0 && age < 3000 ? "正常" : "需检查";
+            return String.format(Locale.US, "第%d路=%s fps=%.1f JPEG延迟=%s",
+                index + 1, health, fps, age >= 0 ? Long.toString(age) + "ms" : "暂无");
+        }
+
+        private String displayStatus(final String rawStatus) {
+            if (rawStatus == null) return "未知";
+            if ("EMPTY".equals(rawStatus)) return "未就绪";
+            if ("READY".equals(rawStatus)) return "可打开";
+            if ("OPEN".equals(rawStatus)) return "已打开";
+            if ("SURFACE DESTROYED".equals(rawStatus)) return "预览窗口已销毁";
+            if (rawStatus.startsWith("OPEN FAILED")) return "打开失败";
+            return rawStatus;
         }
     }
 }

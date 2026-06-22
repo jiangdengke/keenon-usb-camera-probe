@@ -91,6 +91,7 @@ public final class MainActivity extends Activity {
     private CameraSlot[] mSlots;
     private TextView mStatusText;
     private TextView mServerText;
+    private Button mLogButton;
     private LinearLayout mSlotGrid;
     private LinearLayout[] mSlotRows;
     private TextView mLogText;
@@ -114,7 +115,7 @@ public final class MainActivity extends Activity {
                 addLog(message);
             }
         });
-        addLog("App created. HTTP port=" + STREAM_PORT);
+        addLog("应用已启动，HTTP端口=" + STREAM_PORT);
     }
 
     @Override
@@ -125,7 +126,7 @@ public final class MainActivity extends Activity {
             mStreamHub.start();
         }
         updateServerInfo();
-        addLog("USB monitor registered");
+        addLog("USB监听已启动");
         mUiHandler.postDelayed(mScanRunnable, 800);
         mUiHandler.postDelayed(mFpsRunnable, 1000);
     }
@@ -166,7 +167,7 @@ public final class MainActivity extends Activity {
         topBar.setPadding(dp(8), dp(6), dp(8), dp(6));
 
         final Button scanButton = new Button(this);
-        scanButton.setText("Scan/Open UVC");
+        scanButton.setText("扫描/打开");
         scanButton.setAllCaps(false);
         scanButton.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -178,23 +179,35 @@ public final class MainActivity extends Activity {
             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         final Button closeButton = new Button(this);
-        closeButton.setText("Close all");
+        closeButton.setText("关闭全部");
         closeButton.setAllCaps(false);
         closeButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(final View v) {
                 closeAllCameras();
-                updateStatus("Closed all cameras");
+                updateStatus("已关闭全部摄像头");
             }
         });
         topBar.addView(closeButton, new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        mLogButton = new Button(this);
+        mLogButton.setText("显示日志");
+        mLogButton.setAllCaps(false);
+        mLogButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(final View v) {
+                toggleLogPanel();
+            }
+        });
+        topBar.addView(mLogButton, new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         mStatusText = new TextView(this);
         mStatusText.setTextColor(Color.WHITE);
         mStatusText.setTextSize(12);
         mStatusText.setPadding(dp(8), 0, 0, 0);
-        mStatusText.setText("Waiting for USB scan...");
+        mStatusText.setText("等待USB扫描...");
         topBar.addView(mStatusText, new LinearLayout.LayoutParams(
             0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
         root.addView(topBar, new LinearLayout.LayoutParams(
@@ -205,9 +218,22 @@ public final class MainActivity extends Activity {
         mServerText.setTextSize(12);
         mServerText.setPadding(dp(8), dp(4), dp(8), dp(4));
         mServerText.setBackgroundColor(Color.rgb(20, 20, 32));
-        mServerText.setText("LAN access will appear after HTTP server starts");
+        mServerText.setText("HTTP服务启动后会显示局域网访问地址");
         root.addView(mServerText, new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        mLogScroll = new ScrollView(this);
+        mLogScroll.setBackgroundColor(Color.rgb(8, 8, 8));
+        mLogScroll.setVisibility(View.GONE);
+        mLogText = new TextView(this);
+        mLogText.setTextColor(Color.rgb(180, 255, 180));
+        mLogText.setTextSize(10);
+        mLogText.setPadding(dp(8), dp(4), dp(8), dp(4));
+        mLogText.setText("点击上方“显示日志”后，这里会显示运行日志...");
+        mLogScroll.addView(mLogText, new ScrollView.LayoutParams(
+            ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+        root.addView(mLogScroll, new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(150)));
 
         mSlotGrid = new LinearLayout(this);
         mSlotGrid.setOrientation(LinearLayout.VERTICAL);
@@ -232,18 +258,28 @@ public final class MainActivity extends Activity {
         }
         updateVisibleSlots(0);
 
-        mLogScroll = new ScrollView(this);
-        mLogScroll.setBackgroundColor(Color.rgb(8, 8, 8));
-        mLogText = new TextView(this);
-        mLogText.setTextColor(Color.rgb(180, 255, 180));
-        mLogText.setTextSize(10);
-        mLogText.setPadding(dp(8), dp(4), dp(8), dp(4));
-        mLogText.setText("Logs will appear here...");
-        mLogScroll.addView(mLogText, new ScrollView.LayoutParams(
-            ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
-        root.addView(mLogScroll, new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(120)));
         return root;
+    }
+
+    private void toggleLogPanel() {
+        if (mLogScroll == null) return;
+        setLogPanelVisible(mLogScroll.getVisibility() != View.VISIBLE);
+    }
+
+    private void setLogPanelVisible(final boolean visible) {
+        if (mLogScroll == null) return;
+        mLogScroll.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (mLogButton != null) {
+            mLogButton.setText(visible ? "隐藏日志" : "显示日志");
+        }
+        if (visible) {
+            mLogScroll.post(new Runnable() {
+                @Override
+                public void run() {
+                    mLogScroll.fullScroll(View.FOCUS_DOWN);
+                }
+            });
+        }
     }
 
     private void updateVisibleSlots(final int requestedSlotCount) {
@@ -322,10 +358,10 @@ public final class MainActivity extends Activity {
         updateVisibleSlots(Math.min(mLastUvcCount, MAX_CAMERAS));
 
         Log.i(TAG, "USB devices=" + allDevices.size() + ", UVC candidates=" + uvcDevices.size());
-        addLog("Scan: USB=" + allDevices.size() + " UVC=" + uvcDevices.size());
+        addLog("扫描结果：USB设备=" + allDevices.size() + "，UVC摄像头=" + uvcDevices.size());
         for (final UsbDevice device : allDevices) {
             Log.i(TAG, describeDevice(device));
-            addLog("USB: " + describeDevice(device));
+            addLog("发现USB设备：" + describeDevice(device));
         }
 
         int queuedOrOpened = mOpenedByDeviceName.size() + mPermissionQueue.size()
@@ -342,11 +378,11 @@ public final class MainActivity extends Activity {
             mPermissionQueue.add(device);
             mQueuedDeviceNames.add(deviceName);
             queuedOrOpened++;
-            addLog("Queue permission: " + shortDeviceName(device));
+            addLog("加入授权队列：" + shortDeviceName(device));
         }
 
         requestNextPermissionIfNeeded();
-        updateStatus("Scan complete");
+        updateStatus("扫描完成");
     }
 
     private void requestNextPermissionIfNeeded() {
@@ -359,12 +395,12 @@ public final class MainActivity extends Activity {
         mWaitingForPermission = true;
         mPermissionDeviceName = device.getDeviceName();
 
-        updateStatus("Requesting USB permission for " + shortDeviceName(device));
-        addLog("Request permission: " + shortDeviceName(device));
+        updateStatus("正在请求USB授权：" + shortDeviceName(device));
+        addLog("请求USB授权：" + shortDeviceName(device));
         final boolean failed = mUSBMonitor.requestPermission(device);
         if (failed) {
             Log.w(TAG, "Failed to request USB permission: " + describeDevice(device));
-            addLog("Request permission failed: " + shortDeviceName(device));
+            addLog("USB授权请求失败：" + shortDeviceName(device));
             mWaitingForPermission = false;
             mPermissionDeviceName = null;
             requestNextPermissionIfNeeded();
@@ -375,14 +411,14 @@ public final class MainActivity extends Activity {
         @Override
         public void onAttach(final UsbDevice device) {
             Log.i(TAG, "onAttach: " + describeDevice(device));
-            addLog("USB attached: " + shortDeviceName(device));
+            addLog("USB已插入：" + shortDeviceName(device));
             mUiHandler.postDelayed(mScanRunnable, 300);
         }
 
         @Override
         public void onConnect(final UsbDevice device, final UsbControlBlock ctrlBlock, final boolean createNew) {
             Log.i(TAG, "onConnect: " + describeDevice(device));
-            addLog("USB connected: " + shortDeviceName(device));
+            addLog("USB已授权并连接：" + shortDeviceName(device));
             mUiHandler.post(new Runnable() {
                 @Override
                 public void run() {
@@ -400,7 +436,7 @@ public final class MainActivity extends Activity {
         @Override
         public void onDisconnect(final UsbDevice device, final UsbControlBlock ctrlBlock) {
             Log.i(TAG, "onDisconnect: " + describeDevice(device));
-            addLog("USB disconnected: " + shortDeviceName(device));
+            addLog("USB已断开：" + shortDeviceName(device));
             mUiHandler.post(new Runnable() {
                 @Override
                 public void run() {
@@ -408,7 +444,7 @@ public final class MainActivity extends Activity {
                     if (slot != null) {
                         slot.closeCamera();
                     }
-                    updateStatus("USB camera disconnected");
+                    updateStatus("USB摄像头已断开");
                 }
             });
         }
@@ -416,19 +452,19 @@ public final class MainActivity extends Activity {
         @Override
         public void onDettach(final UsbDevice device) {
             Log.i(TAG, "onDettach: " + describeDevice(device));
-            addLog("USB detached: " + shortDeviceName(device));
+            addLog("USB已拔出：" + shortDeviceName(device));
         }
 
         @Override
         public void onCancel(final UsbDevice device) {
             Log.w(TAG, "USB permission canceled: " + (device != null ? describeDevice(device) : "null"));
-            addLog("USB permission canceled: " + (device != null ? shortDeviceName(device) : "null"));
+            addLog("USB授权已取消：" + (device != null ? shortDeviceName(device) : "null"));
             mUiHandler.post(new Runnable() {
                 @Override
                 public void run() {
                     mWaitingForPermission = false;
                     mPermissionDeviceName = null;
-                    updateStatus("USB permission canceled");
+                    updateStatus("USB授权已取消");
                     requestNextPermissionIfNeeded();
                 }
             });
@@ -437,13 +473,13 @@ public final class MainActivity extends Activity {
 
     private void openConnectedDevice(final UsbDevice device, final UsbControlBlock ctrlBlock) {
         if (mOpenedByDeviceName.containsKey(device.getDeviceName())) {
-            updateStatus("Already opened " + shortDeviceName(device));
+            updateStatus("摄像头已打开：" + shortDeviceName(device));
             return;
         }
 
         final CameraSlot slot = findFreeReadySlot();
         if (slot == null) {
-            updateStatus("No free preview tile. Close a camera and scan again.");
+            updateStatus("没有可用预览窗口，请关闭摄像头后重新扫描");
             return;
         }
 
@@ -479,12 +515,12 @@ public final class MainActivity extends Activity {
 
         Log.i(TAG, "Opened slot " + (slot.index + 1) + ": " + describeDevice(device));
         Log.i(TAG, "Supported sizes slot " + (slot.index + 1) + ": " + supportedSize);
-        addLog("Opened slot " + (slot.index + 1) + ": " + shortDeviceName(device)
+        addLog("已打开第" + (slot.index + 1) + "路：" + shortDeviceName(device)
             + " " + preview.width + "x" + preview.height + " " + preview.formatName());
-        updateStatus("Opened " + shortDeviceName(device));
+        updateStatus("已打开摄像头：" + shortDeviceName(device));
     } catch (final Exception e) {
         Log.e(TAG, "Failed to open camera: " + describeDevice(device), e);
-        addLog("Open failed: " + shortDeviceName(device) + " err=" + e.getMessage());
+        addLog("打开失败：" + shortDeviceName(device) + "，原因=" + e.getMessage());
         if (camera != null) {
             try {
                 camera.destroy();
@@ -496,7 +532,7 @@ public final class MainActivity extends Activity {
             mStreamHub.onSlotClosed(slot.index, slot.status);
         }
         slot.refreshLabel();
-        updateStatus("Open failed. See logcat tag " + TAG);
+        updateStatus("打开失败，请点“显示日志”查看原因");
     }
 }
 
@@ -649,7 +685,7 @@ public final class MainActivity extends Activity {
             .append(" max=").append(MAX_CAMERAS)
             .append(" pending=").append(mPermissionQueue.size());
         if (mWaitingForPermission) {
-            sb.append(" waitingPermission");
+            sb.append(" 等待授权");
         }
         if (mStreamHub != null && mStreamHub.isRunning()) {
             sb.append(" | HTTP ").append(mStreamHub.getBaseUrl())
@@ -668,12 +704,12 @@ public final class MainActivity extends Activity {
         if (mServerText == null) return;
         if (mStreamHub != null && mStreamHub.isRunning()) {
             final String baseUrl = mStreamHub.getBaseUrl();
-            mServerText.setText("LAN access: " + baseUrl
-                + "\nCameras: " + baseUrl + "/cameras"
-                + " | Stream0: " + baseUrl + "/stream/0.mjpeg"
-                + " | Stream1: " + baseUrl + "/stream/1.mjpeg");
+            mServerText.setText("局域网访问：" + baseUrl
+                + "\n摄像头列表：" + baseUrl + "/cameras"
+                + " | 第1路：" + baseUrl + "/stream/0.mjpeg"
+                + " | 第2路：" + baseUrl + "/stream/1.mjpeg");
         } else {
-            mServerText.setText("HTTP server stopped. Keep app open to stream cameras.");
+            mServerText.setText("HTTP服务已停止，保持App打开才能拉流。");
         }
     }
 
@@ -819,7 +855,7 @@ public final class MainActivity extends Activity {
 
         void refreshLabel() {
             final StringBuilder sb = new StringBuilder();
-            sb.append("Slot ").append(index + 1).append(" ").append(status);
+            sb.append("第").append(index + 1).append("路 ").append(displayStatus(status));
             if (preview != null) {
                 sb.append("\n")
                     .append(preview.width).append("x").append(preview.height)
@@ -828,12 +864,22 @@ public final class MainActivity extends Activity {
             if (device != null) {
                 sb.append("\n").append(shortDeviceName(device));
             }
-            sb.append("\nframes=").append(frameCount.get())
+            sb.append("\n帧数=").append(frameCount.get())
                 .append(" fps=").append(String.format(Locale.US, "%.1f", fps));
             if (mStreamHub != null) {
                 sb.append(mStreamHub.getSlotLabelExtra(index));
             }
             label.setText(sb.toString());
+        }
+
+        private String displayStatus(final String rawStatus) {
+            if (rawStatus == null) return "未知";
+            if ("EMPTY".equals(rawStatus)) return "未就绪";
+            if ("READY".equals(rawStatus)) return "可打开";
+            if ("OPEN".equals(rawStatus)) return "已打开";
+            if ("SURFACE DESTROYED".equals(rawStatus)) return "预览窗口已销毁";
+            if (rawStatus.startsWith("OPEN FAILED")) return "打开失败" + rawStatus.substring("OPEN FAILED".length());
+            return rawStatus;
         }
 
         void closeCamera() {
@@ -854,7 +900,7 @@ public final class MainActivity extends Activity {
             }
 
             if (cameraToClose != null) {
-                addLog("Closing slot " + (index + 1));
+                addLog("正在关闭第" + (index + 1) + "路摄像头");
                 try {
                     cameraToClose.setFrameCallback(null, 0);
                     cameraToClose.stopPreview();

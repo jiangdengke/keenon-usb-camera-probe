@@ -33,3 +33,23 @@
 - `docs/eight-camera-probe.md`: changed the 8-camera note into dynamic probe behavior documentation while retaining the 8-camera cap.
 - `progress.md`: appended this implementation and verification record.
 - Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.
+
+## 2026-06-22 - Task: Add on-device Chinese log panel
+
+### What was done
+- Added a top-bar log toggle next to scan and close controls so field users can show or hide the built-in log panel without ADB.
+- Moved the built-in log panel above the preview grid when visible, keeping it hidden by default to preserve preview space.
+- Localized user-facing in-app logs and camera labels to Chinese for scan, permission, open failure, stream readiness, and health status.
+- Updated documentation to explain the on-device log button and Chinese field logs.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Checked IDE diagnostics for `MainActivity.java` and `CameraStreamHub.java`; no diagnostics were reported.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: added the top-bar log button, hide/show log panel behavior, and Chinese user-facing probe logs/status text.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java`: changed app-facing stream and health logs to Chinese.
+- `README.md`: documented the top-bar log button, updated Logcat tags, and added guidance for one missing preview.
+- `docs/eight-camera-probe.md`: documented the Chinese log toggle and localized field logs.
+- `progress.md`: appended this implementation and verification record.
+- Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.

@@ -9,6 +9,8 @@
 - 包名：`com.serenegiant.usbcameratest7`。
 - 启动后自动扫描 USB 设备，筛选 UVC 摄像头。
 - 检测到几路 UVC 摄像头就显示几路，默认最多同时打开 8 路。
+- 顶部按钮区提供“扫描/打开”、“关闭全部”、“显示日志/隐藏日志”，日志面板展开后显示在预览区上方。
+- App 内运行日志尽量使用中文，方便现场人员直接判断扫描、授权、打开失败、拉流和健康状态。
 - UI 会自动生成预览网格，1 路显示 1 个格子，2 路及以上按 2 列递增排列，每个格子显示：
   - slot 状态
   - 预览分辨率和格式
@@ -110,8 +112,10 @@ adb shell monkey -p com.serenegiant.usbcameratest7 1
 查看日志：
 
 ```bash
-adb logcat -s KeenonUvcProbe UVCCamera USBMonitor
+adb logcat -s KeenonUvcProbe KeenonStreamHub UVCCamera USBMonitor
 ```
+
+也可以在 App 顶部点击“显示日志”，直接展开内置日志窗口；再次点击“隐藏日志”可收起。
 
 ## GitHub Release 自动发布
 
@@ -163,6 +167,7 @@ Workflow 会执行：
 - `UVC>0 opened=0`：通常是 USB 权限被拒绝、预览 surface 未就绪、或 native 打开失败；看 `KeenonUvcProbe` 日志。
 - 只能打开一路：可能是 USB 带宽、电源、摄像头格式、机器人内核/驱动限制；可以尝试降低分辨率或只保留 MJPEG。
 - 有预览但 `fps=0`：说明预览 surface 可能在跑，但 frame callback 没有数据；后续做流服务前需要解决这个问题。
+- 有一路没有画面：先点顶部“显示日志”，看对应路是否有“打开失败”、`fps=0`、`JPEG延迟=暂无` 或“需检查”。
 
 ## 下一步
 
