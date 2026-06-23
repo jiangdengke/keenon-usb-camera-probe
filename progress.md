@@ -151,3 +151,23 @@
 - `docs/eight-camera-probe.md`: documented the updated field verification behavior and diagnosis fields.
 - `progress.md`: appended this implementation and verification record.
 - Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.
+
+## 2026-06-23 - Task: Add FPS compatibility fallback
+
+### What was done
+- Added a fallback when cameras reject the low-bandwidth 1-10 FPS preview request, automatically retrying the same size and format with the wider 1-31 FPS range.
+- Kept the low-bandwidth MJPEG-first size selection and bandwidth factor while avoiding a hard open failure on cameras that only accept their broader advertised FPS interval.
+- Added `fpsFallback` to the on-device label and `/cameras` response so field users can tell whether a route had to use the compatibility FPS range.
+- Updated field documentation to explain `低FPS不兼容` and `fpsFallback=true`.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Checked IDE diagnostics for `MainActivity.java`, `CameraStreamHub.java`, `README.md`, and `docs/eight-camera-probe.md`; no diagnostics were reported.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: added preview FPS compatibility fallback and per-slot fallback display.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java`: added `fpsFallback` to stream readiness logs and `/cameras` JSON.
+- `README.md`: documented the compatibility FPS fallback and new diagnosis field.
+- `docs/eight-camera-probe.md`: documented the field interpretation for low-FPS incompatibility.
+- `progress.md`: appended this implementation and verification record.
+- Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.

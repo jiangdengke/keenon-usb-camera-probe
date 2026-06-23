@@ -145,8 +145,8 @@ final class CameraStreamHub {
 
     void onSlotOpened(final int slotIndex, final String deviceLabel, final int width,
         final int height, final String formatName, final int openSequence,
-        final int fpsMin, final int fpsMax, final float bandwidthFactor,
-        final String selectionReason, final boolean lowBandwidthMode) {
+        final int fpsMin, final int fpsMax, final boolean fpsFallback,
+        final float bandwidthFactor, final String selectionReason, final boolean lowBandwidthMode) {
         if (!isValidSlot(slotIndex)) return;
         final SlotState slot = mSlots[slotIndex];
         slot.status = "OPEN";
@@ -157,6 +157,7 @@ final class CameraStreamHub {
         slot.openSequence = openSequence;
         slot.fpsMin = fpsMin;
         slot.fpsMax = fpsMax;
+        slot.fpsFallback = fpsFallback;
         slot.bandwidthFactor = bandwidthFactor;
         slot.selectionReason = selectionReason;
         slot.lowBandwidthMode = lowBandwidthMode;
@@ -169,6 +170,7 @@ final class CameraStreamHub {
         slot.jpegCount.set(0);
         log("第" + (slotIndex + 1) + "路拉流已就绪：" + getStreamUrl(slotIndex)
             + "，打开序号=#" + openSequence + "，fps=" + fpsMin + "-" + fpsMax
+            + (fpsFallback ? "(回退)" : "")
             + "，带宽系数=" + bandwidthFactor + "，策略=" + selectionReason);
     }
 
@@ -183,6 +185,7 @@ final class CameraStreamHub {
         slot.openSequence = 0;
         slot.fpsMin = 0;
         slot.fpsMax = 0;
+        slot.fpsFallback = false;
         slot.bandwidthFactor = 0f;
         slot.selectionReason = null;
         slot.lowBandwidthMode = false;
@@ -403,6 +406,7 @@ final class CameraStreamHub {
                 .append("\"openSequence\":").append(slot.openSequence).append(',')
                 .append("\"fpsMin\":").append(slot.fpsMin).append(',')
                 .append("\"fpsMax\":").append(slot.fpsMax).append(',')
+                .append("\"fpsFallback\":").append(slot.fpsFallback).append(',')
                 .append("\"bandwidthFactor\":")
                 .append(String.format(Locale.US, "%.2f", slot.bandwidthFactor)).append(',')
                 .append("\"lowBandwidthMode\":").append(slot.lowBandwidthMode).append(',')
@@ -530,6 +534,7 @@ final class CameraStreamHub {
         volatile int openSequence;
         volatile int fpsMin;
         volatile int fpsMax;
+        volatile boolean fpsFallback;
         volatile float bandwidthFactor;
         volatile String selectionReason;
         volatile boolean lowBandwidthMode;

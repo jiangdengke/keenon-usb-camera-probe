@@ -82,6 +82,8 @@ public final class MainActivity extends Activity {
     private static final int LOW_BANDWIDTH_TARGET_HEIGHT = 240;
     private static final int PREVIEW_MIN_FPS = 1;
     private static final int PREVIEW_MAX_FPS = 10;
+    private static final int PREVIEW_COMPAT_MIN_FPS = 1;
+    private static final int PREVIEW_COMPAT_MAX_FPS = 31;
     private static final int USB_CLASS_VIDEO = 14;
     private static final int STREAM_PORT = 8080;
     private static final int MAX_LOG_LINES = 220;
@@ -136,6 +138,7 @@ public final class MainActivity extends Activity {
             addLog("强低带宽诊断模式已启用：MJPEG优先，目标<="
                 + LOW_BANDWIDTH_TARGET_WIDTH + "x" + LOW_BANDWIDTH_TARGET_HEIGHT
                 + "，fps=" + PREVIEW_MIN_FPS + "-" + PREVIEW_MAX_FPS
+                + "，失败回退fps=" + PREVIEW_COMPAT_MIN_FPS + "-" + PREVIEW_COMPAT_MAX_FPS
                 + "，带宽系数=" + BANDWIDTH_FACTOR + "/" + RETRY_BANDWIDTH_FACTOR
                 + "，错峰=" + OPEN_STAGGER_DELAY_MS + "ms");
         }
@@ -572,14 +575,20 @@ public final class MainActivity extends Activity {
                 ? RETRY_BANDWIDTH_FACTOR : BANDWIDTH_FACTOR;
             final String previewReason = previewSelectionReason(preview);
             final int requestedFormat = preview.format;
-            setPreviewSize(camera, preview, bandwidthFactor);
+            final PreviewSettings previewSettings = setPreviewSize(camera, preview, bandwidthFactor,
+                slot.index);
             if (preview.format != requestedFormat) {
                 addLog("强诊断：第" + (slot.index + 1) + "路 MJPEG 设置失败，已切换为 "
                     + preview.formatName());
             }
+            if (previewSettings.fpsFallback) {
+                addLog("强诊断：第" + (slot.index + 1) + "路低FPS不兼容，已回退fps="
+                    + previewSettings.fpsMin + "-" + previewSettings.fpsMax);
+            }
             addLog("第" + (slot.index + 1) + "路优先低分辨率：选用 "
                 + preview.width + "x" + preview.height + " " + preview.formatName()
-                + "，" + previewReason + "，fps=" + PREVIEW_MIN_FPS + "-" + PREVIEW_MAX_FPS
+                + "，" + previewReason + "，fps=" + previewSettings.fpsMin + "-"
+                + previewSettings.fpsMax
                 + "，带宽系数=" + bandwidthFactor + "，打开序号=#" + openSequence);
 
             if (slot.texture.getSurfaceTexture() != null) {
@@ -601,6 +610,9 @@ public final class MainActivity extends Activity {
             slot.previewReason = previewReason;
             slot.openStrategy = slot.noFrameRetryCount > 0
                 ? retryStrategyName(slot.noFrameRetryCount) : "首次强低带宽打开";
+            slot.previewFpsMin = previewSettings.fpsMin;
+            slot.previewFpsMax = previewSettings.fpsMax;
+            slot.fpsFallback = previewSettings.fpsFallback;
             slot.status = "OPEN";
             slot.frameCount.set(0);
             slot.lastFrameCount = 0;
@@ -614,8 +626,9 @@ public final class MainActivity extends Activity {
             mOpenedByDeviceName.put(device.getDeviceName(), slot);
             if (mStreamHub != null) {
                 mStreamHub.onSlotOpened(slot.index, shortDeviceName(device), preview.width,
-                    preview.height, preview.formatName(), openSequence, PREVIEW_MIN_FPS,
-                    PREVIEW_MAX_FPS, bandwidthFactor, previewReason, LOW_BANDWIDTH_DIAGNOSTIC_MODE);
+                    preview.height, preview.formatName(), openSequence, previewSettings.fpsMin,
+                    previewSettings.fpsMax, previewSettings.fpsFallback, bandwidthFactor,
+                    previewReason, LOW_BANDWIDTH_DIAGNOSTIC_MODE);
             }
             slot.startNoFrameRetryMonitor();
 
@@ -644,18 +657,36 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void setPreviewSize(final UVCCamera camera, final PreviewChoice preview,
-        final float bandwidthFactor) {
+    private PreviewSettings setPreviewSize(final UVCCamera camera, final PreviewChoice preview,
+        final float bandwidthFactor, final int slotIndex) {
         try {
             camera.setPreviewSize(preview.width, preview.height, PREVIEW_MIN_FPS, PREVIEW_MAX_FPS,
                 preview.format, bandwidthFactor);
-        } catch (final IllegalArgumentException e) {
-            if (preview.format == UVCCamera.FRAME_FORMAT_MJPEG) {
-                camera.setPreviewSize(preview.width, preview.height, PREVIEW_MIN_FPS, PREVIEW_MAX_FPS,
-                    UVCCamera.FRAME_FORMAT_YUYV, bandwidthFactor);
+            return new PreviewSettings(PREVIEW_MIN_FPS, PREVIEW_MAX_FPS, false);
+        } catch (final IllegalArgumentException lowFpsError) {
+            addLog("强诊断：第" + (slotIndex + 1) + "路低FPS预览参数失败，格式="
+                + preview.formatName() + "，fps=" + PREVIEW_MIN_FPS + "-" + PREVIEW_MAX_FPS
+                + "，原因=" + lowFpsError.getMessage());
+            try {
+                camera.setPreviewSize(preview.width, preview.height, PREVIEW_COMPAT_MIN_FPS,
+                    PREVIEW_COMPAT_MAX_FPS, preview.format, bandwidthFactor);
+                return new PreviewSettings(PREVIEW_COMPAT_MIN_FPS, PREVIEW_COMPAT_MAX_FPS, true);
+            } catch (final IllegalArgumentException compatFpsError) {
+                if (preview.format != UVCCamera.FRAME_FORMAT_MJPEG) {
+                    throw compatFpsError;
+                }
+                addLog("强诊断：第" + (slotIndex + 1) + "路 MJPEG 兼容FPS仍失败，尝试YUYV");
                 preview.format = UVCCamera.FRAME_FORMAT_YUYV;
-            } else {
-                throw e;
+                try {
+                    camera.setPreviewSize(preview.width, preview.height, PREVIEW_MIN_FPS,
+                        PREVIEW_MAX_FPS, preview.format, bandwidthFactor);
+                    return new PreviewSettings(PREVIEW_MIN_FPS, PREVIEW_MAX_FPS, false);
+                } catch (final IllegalArgumentException yuyvLowFpsError) {
+                    addLog("强诊断：第" + (slotIndex + 1) + "路 YUYV 低FPS也失败，回退兼容FPS");
+                    camera.setPreviewSize(preview.width, preview.height, PREVIEW_COMPAT_MIN_FPS,
+                        PREVIEW_COMPAT_MAX_FPS, preview.format, bandwidthFactor);
+                    return new PreviewSettings(PREVIEW_COMPAT_MIN_FPS, PREVIEW_COMPAT_MAX_FPS, true);
+                }
             }
         }
     }
@@ -1037,6 +1068,9 @@ public final class MainActivity extends Activity {
         long noFrameMonitorId;
         float fps;
         int openSequence;
+        int previewFpsMin;
+        int previewFpsMax;
+        boolean fpsFallback;
         float bandwidthFactor;
         String previewReason;
         String openStrategy;
@@ -1247,6 +1281,12 @@ public final class MainActivity extends Activity {
                 if (openSequence > 0) {
                     sb.append(" #").append(openSequence);
                 }
+                if (previewFpsMax > 0) {
+                    sb.append(" fps=").append(previewFpsMin).append('-').append(previewFpsMax);
+                    if (fpsFallback) {
+                        sb.append(" 回退");
+                    }
+                }
             }
             if (device != null) {
                 sb.append("\n").append(shortDeviceName(device));
@@ -1290,6 +1330,9 @@ public final class MainActivity extends Activity {
             preview = null;
             supportedSizeJson = null;
             openSequence = 0;
+            previewFpsMin = 0;
+            previewFpsMax = 0;
+            fpsFallback = false;
             bandwidthFactor = 0f;
             previewReason = null;
             openStrategy = null;
@@ -1342,6 +1385,18 @@ public final class MainActivity extends Activity {
 
         String formatName() {
             return format == UVCCamera.FRAME_FORMAT_MJPEG ? "MJPEG" : "YUYV";
+        }
+    }
+
+    private static final class PreviewSettings {
+        final int fpsMin;
+        final int fpsMax;
+        final boolean fpsFallback;
+
+        PreviewSettings(final int minFps, final int maxFps, final boolean usedFpsFallback) {
+            fpsMin = minFps;
+            fpsMax = maxFps;
+            fpsFallback = usedFpsFallback;
         }
     }
 }
