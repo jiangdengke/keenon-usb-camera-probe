@@ -95,6 +95,7 @@ public final class MainActivity extends Activity {
     private static final int MAX_NO_FRAME_RETRIES = 2;
     private static final float BANDWIDTH_FACTOR = 0.20f;
     private static final float RETRY_BANDWIDTH_FACTOR = 0.10f;
+    private static final float COMPAT_BANDWIDTH_FACTOR = 1.00f;
 
     private final Handler mUiHandler = new Handler(Looper.getMainLooper());
     private final List<UsbDevice> mPermissionQueue = new ArrayList<UsbDevice>();
@@ -139,7 +140,8 @@ public final class MainActivity extends Activity {
                 + LOW_BANDWIDTH_TARGET_WIDTH + "x" + LOW_BANDWIDTH_TARGET_HEIGHT
                 + "，fps=" + PREVIEW_MIN_FPS + "-" + PREVIEW_MAX_FPS
                 + "，失败回退fps=" + PREVIEW_COMPAT_MIN_FPS + "-" + PREVIEW_COMPAT_MAX_FPS
-                + "，带宽系数=" + BANDWIDTH_FACTOR + "/" + RETRY_BANDWIDTH_FACTOR
+                + "，低分辨率带宽系数=" + BANDWIDTH_FACTOR + "/" + RETRY_BANDWIDTH_FACTOR
+                + "，高分辨率回退=" + COMPAT_BANDWIDTH_FACTOR
                 + "，错峰=" + OPEN_STAGGER_DELAY_MS + "ms");
         }
     }
@@ -571,9 +573,13 @@ public final class MainActivity extends Activity {
             }
             final PreviewChoice preview = choosePreviewSize(mjpegSizes, yuyvSizes,
                 slot.noFrameRetryCount > 0);
-            final float bandwidthFactor = slot.noFrameRetryCount >= 2
-                ? RETRY_BANDWIDTH_FACTOR : BANDWIDTH_FACTOR;
+            final float bandwidthFactor = chooseBandwidthFactor(preview, slot.noFrameRetryCount);
             final String previewReason = previewSelectionReason(preview);
+            if (LOW_BANDWIDTH_DIAGNOSTIC_MODE && !isLowBandwidthPreview(preview)) {
+                addLog("强诊断：第" + (slot.index + 1)
+                    + "路未找到320x240及以下，改用兼容带宽系数="
+                    + bandwidthFactor + "，避免高分辨率低系数无帧");
+            }
             final int requestedFormat = preview.format;
             final PreviewSettings previewSettings = setPreviewSize(camera, preview, bandwidthFactor,
                 slot.index);
@@ -717,11 +723,24 @@ public final class MainActivity extends Activity {
         return new PreviewChoice(TARGET_WIDTH, TARGET_HEIGHT, UVCCamera.FRAME_FORMAT_MJPEG);
     }
 
+    private float chooseBandwidthFactor(final PreviewChoice preview, final int retryCount) {
+        if (!LOW_BANDWIDTH_DIAGNOSTIC_MODE || isLowBandwidthPreview(preview)) {
+            return retryCount >= 2 ? RETRY_BANDWIDTH_FACTOR : BANDWIDTH_FACTOR;
+        }
+        return COMPAT_BANDWIDTH_FACTOR;
+    }
+
+    private boolean isLowBandwidthPreview(final PreviewChoice preview) {
+        return preview != null
+            && preview.width <= LOW_BANDWIDTH_TARGET_WIDTH
+            && preview.height <= LOW_BANDWIDTH_TARGET_HEIGHT;
+    }
+
     private String retryStrategyName(final int retryCount) {
         if (retryCount >= 2) {
-            return "继续MJPEG优先并进一步降低带宽系数";
+            return "低分辨率继续降带宽，高分辨率保持兼容带宽";
         }
-        return "MJPEG低带宽错峰重开";
+        return "MJPEG优先错峰重开";
     }
 
     private String formatSizes(final List<Size> sizes) {
@@ -808,16 +827,14 @@ public final class MainActivity extends Activity {
     }
 
     private String previewSelectionReason(final PreviewChoice preview) {
-        if (LOW_BANDWIDTH_DIAGNOSTIC_MODE
-            && preview.width <= LOW_BANDWIDTH_TARGET_WIDTH
-            && preview.height <= LOW_BANDWIDTH_TARGET_HEIGHT) {
-            return "强低带宽诊断，优先压低USB压力";
+        if (LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
+            if (isLowBandwidthPreview(preview)) {
+                return "强低带宽诊断，优先压低USB压力";
+            }
+            return "未找到320x240及以下，使用兼容带宽系数";
         }
         if (preview.width <= TARGET_WIDTH && preview.height <= TARGET_HEIGHT) {
             return "降低带宽压力";
-        }
-        if (LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
-            return "未找到320x240及以下，使用最小支持分辨率";
         }
         return "未找到640x480及以下，使用最小支持分辨率";
     }

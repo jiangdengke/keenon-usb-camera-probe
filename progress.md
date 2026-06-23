@@ -171,3 +171,22 @@
 - `docs/eight-camera-probe.md`: documented the field interpretation for low-FPS incompatibility.
 - `progress.md`: appended this implementation and verification record.
 - Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.
+
+## 2026-06-23 - Task: Restore compatible bandwidth for higher camera sizes
+
+### What was done
+- Kept the low-bandwidth diagnosis behavior for 320x240-or-lower previews while restoring a compatible 1.00 bandwidth factor when a camera only supports a higher minimum size such as 640x480.
+- Preserved MJPEG-first selection, FPS fallback, staggered opening, and no-frame retry, but stopped lowering the bandwidth factor on higher-resolution fallback previews.
+- Added logs that explicitly call out the compatible bandwidth fallback so field users can tell why 640x480 routes are not using 0.20/0.10.
+- Updated README and field documentation to explain the beta.11 bandwidth behavior and how to interpret persistent no-frame routes after the fallback.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Checked IDE diagnostics for `MainActivity.java`, `README.md`, `docs/eight-camera-probe.md`, and `progress.md`; no diagnostics were reported.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: added compatible bandwidth selection for previews above 320x240 and updated related diagnostics.
+- `README.md`: documented that higher-resolution fallback previews use a 1.00 compatible bandwidth factor.
+- `docs/eight-camera-probe.md`: documented the field interpretation for high-resolution compatible bandwidth fallback.
+- `progress.md`: appended this implementation record.
+- Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.
