@@ -144,7 +144,9 @@ final class CameraStreamHub {
     }
 
     void onSlotOpened(final int slotIndex, final String deviceLabel, final int width,
-        final int height, final String formatName) {
+        final int height, final String formatName, final int openSequence,
+        final int fpsMin, final int fpsMax, final float bandwidthFactor,
+        final String selectionReason, final boolean lowBandwidthMode) {
         if (!isValidSlot(slotIndex)) return;
         final SlotState slot = mSlots[slotIndex];
         slot.status = "OPEN";
@@ -152,6 +154,12 @@ final class CameraStreamHub {
         slot.width = width;
         slot.height = height;
         slot.formatName = formatName;
+        slot.openSequence = openSequence;
+        slot.fpsMin = fpsMin;
+        slot.fpsMax = fpsMax;
+        slot.bandwidthFactor = bandwidthFactor;
+        slot.selectionReason = selectionReason;
+        slot.lowBandwidthMode = lowBandwidthMode;
         slot.latestJpegData = null;
         slot.latestJpegTimestampMs = 0;
         slot.latestFrameCallbackMs = 0;
@@ -159,7 +167,9 @@ final class CameraStreamHub {
         slot.lastJpegSuccessLogMs = 0;
         slot.lastJpegWarnLogMs = 0;
         slot.jpegCount.set(0);
-        log("第" + (slotIndex + 1) + "路拉流已就绪：" + getStreamUrl(slotIndex));
+        log("第" + (slotIndex + 1) + "路拉流已就绪：" + getStreamUrl(slotIndex)
+            + "，打开序号=#" + openSequence + "，fps=" + fpsMin + "-" + fpsMax
+            + "，带宽系数=" + bandwidthFactor + "，策略=" + selectionReason);
     }
 
     void onSlotClosed(final int slotIndex, final String status) {
@@ -170,6 +180,12 @@ final class CameraStreamHub {
         slot.width = 0;
         slot.height = 0;
         slot.formatName = null;
+        slot.openSequence = 0;
+        slot.fpsMin = 0;
+        slot.fpsMax = 0;
+        slot.bandwidthFactor = 0f;
+        slot.selectionReason = null;
+        slot.lowBandwidthMode = false;
         slot.fps = 0f;
         slot.frameCount = 0;
         slot.latestJpegData = null;
@@ -384,6 +400,13 @@ final class CameraStreamHub {
                 .append("\"width\":").append(slot.width).append(',')
                 .append("\"height\":").append(slot.height).append(',')
                 .append("\"format\":\"").append(jsonEscape(slot.formatName)).append("\",")
+                .append("\"openSequence\":").append(slot.openSequence).append(',')
+                .append("\"fpsMin\":").append(slot.fpsMin).append(',')
+                .append("\"fpsMax\":").append(slot.fpsMax).append(',')
+                .append("\"bandwidthFactor\":")
+                .append(String.format(Locale.US, "%.2f", slot.bandwidthFactor)).append(',')
+                .append("\"lowBandwidthMode\":").append(slot.lowBandwidthMode).append(',')
+                .append("\"selectionReason\":\"").append(jsonEscape(slot.selectionReason)).append("\",")
                 .append("\"frames\":").append(slot.frameCount).append(',')
                 .append("\"fps\":").append(String.format(Locale.US, "%.1f", slot.fps)).append(',')
                 .append("\"lastFrameAgeMs\":").append(slot.latestFrameCallbackMs > 0
@@ -504,6 +527,12 @@ final class CameraStreamHub {
         volatile int width;
         volatile int height;
         volatile String formatName;
+        volatile int openSequence;
+        volatile int fpsMin;
+        volatile int fpsMax;
+        volatile float bandwidthFactor;
+        volatile String selectionReason;
+        volatile boolean lowBandwidthMode;
         volatile long frameCount;
         volatile float fps;
         volatile byte[] latestJpegData;
@@ -525,8 +554,8 @@ final class CameraStreamHub {
             final long age = latestJpegTimestampMs > 0
                 ? Math.max(0, System.currentTimeMillis() - latestJpegTimestampMs) : -1;
             final String health = "正常".equals(diagnosis(System.currentTimeMillis())) ? "正常" : "需检查";
-            return String.format(Locale.US, "第%d路=%s fps=%.1f 帧=%d JPEG=%d 延迟=%s 诊断=%s",
-                index + 1, health, fps, frameCount, jpegCount.get(),
+            return String.format(Locale.US, "第%d路=#%d %s fps=%.1f 帧=%d JPEG=%d 延迟=%s 诊断=%s",
+                index + 1, openSequence, health, fps, frameCount, jpegCount.get(),
                 age >= 0 ? Long.toString(age) + "ms" : "暂无", diagnosis(System.currentTimeMillis()));
         }
 

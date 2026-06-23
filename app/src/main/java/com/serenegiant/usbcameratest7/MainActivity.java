@@ -77,6 +77,11 @@ public final class MainActivity extends Activity {
     private static final int GRID_COLUMNS = 2;
     private static final int TARGET_WIDTH = 640;
     private static final int TARGET_HEIGHT = 480;
+    private static final boolean LOW_BANDWIDTH_DIAGNOSTIC_MODE = true;
+    private static final int LOW_BANDWIDTH_TARGET_WIDTH = 320;
+    private static final int LOW_BANDWIDTH_TARGET_HEIGHT = 240;
+    private static final int PREVIEW_MIN_FPS = 1;
+    private static final int PREVIEW_MAX_FPS = 10;
     private static final int USB_CLASS_VIDEO = 14;
     private static final int STREAM_PORT = 8080;
     private static final int MAX_LOG_LINES = 220;
@@ -84,9 +89,10 @@ public final class MainActivity extends Activity {
     private static final long NO_FRAME_RETRY_WAIT_MS = 5000;
     private static final long NO_FRAME_RETRY_FALLBACK_GRACE_MS = 1000;
     private static final long NO_FRAME_RETRY_DELAY_MS = 1200;
+    private static final long OPEN_STAGGER_DELAY_MS = 900;
     private static final int MAX_NO_FRAME_RETRIES = 2;
-    private static final float BANDWIDTH_FACTOR = 0.5f;
-    private static final float RETRY_BANDWIDTH_FACTOR = 0.25f;
+    private static final float BANDWIDTH_FACTOR = 0.20f;
+    private static final float RETRY_BANDWIDTH_FACTOR = 0.10f;
 
     private final Handler mUiHandler = new Handler(Looper.getMainLooper());
     private final List<UsbDevice> mPermissionQueue = new ArrayList<UsbDevice>();
@@ -105,11 +111,14 @@ public final class MainActivity extends Activity {
     private ScrollView mLogScroll;
     private final List<String> mLogLines = new ArrayList<String>();
     private boolean mWaitingForPermission;
+    private boolean mPermissionRequestScheduled;
     private String mPermissionDeviceName;
+    private long mLastPermissionRequestMs;
     private int mLastUsbCount;
     private int mLastUvcCount;
     private int mVisibleSlotCount;
     private long mLastHealthLogMs;
+    private int mOpenSequence;
 
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
@@ -123,6 +132,13 @@ public final class MainActivity extends Activity {
             }
         });
         addLog("应用已启动，版本=" + appVersionText() + "，HTTP端口=" + STREAM_PORT);
+        if (LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
+            addLog("强低带宽诊断模式已启用：MJPEG优先，目标<="
+                + LOW_BANDWIDTH_TARGET_WIDTH + "x" + LOW_BANDWIDTH_TARGET_HEIGHT
+                + "，fps=" + PREVIEW_MIN_FPS + "-" + PREVIEW_MAX_FPS
+                + "，带宽系数=" + BANDWIDTH_FACTOR + "/" + RETRY_BANDWIDTH_FACTOR
+                + "，错峰=" + OPEN_STAGGER_DELAY_MS + "ms");
+        }
     }
 
     @Override
@@ -142,6 +158,8 @@ public final class MainActivity extends Activity {
     protected void onStop() {
         mUiHandler.removeCallbacks(mScanRunnable);
         mUiHandler.removeCallbacks(mFpsRunnable);
+        mUiHandler.removeCallbacks(mPermissionRequestRunnable);
+        mPermissionRequestScheduled = false;
         closeAllCameras();
         if (mStreamHub != null) {
             mStreamHub.stop();
@@ -358,6 +376,14 @@ public final class MainActivity extends Activity {
         }
     };
 
+    private final Runnable mPermissionRequestRunnable = new Runnable() {
+        @Override
+        public void run() {
+            mPermissionRequestScheduled = false;
+            requestNextPermissionIfNeeded();
+        }
+    };
+
     private void scanAndRequestUvcDevices() {
         if (mUSBMonitor == null) return;
 
@@ -403,7 +429,21 @@ public final class MainActivity extends Activity {
     }
 
     private void requestNextPermissionIfNeeded() {
-        if (mWaitingForPermission || mPermissionQueue.isEmpty() || !hasFreeReadySlot()) {
+        if (mUSBMonitor == null || mPermissionRequestScheduled || mWaitingForPermission
+            || mPermissionQueue.isEmpty()) {
+            return;
+        }
+        if (findFreeReadySlot(mPermissionQueue.get(0)) == null) {
+            return;
+        }
+
+        final long now = System.currentTimeMillis();
+        final long elapsedMs = now - mLastPermissionRequestMs;
+        if (mLastPermissionRequestMs > 0 && elapsedMs < OPEN_STAGGER_DELAY_MS) {
+            final long delayMs = OPEN_STAGGER_DELAY_MS - elapsedMs;
+            mPermissionRequestScheduled = true;
+            addLog("错峰打开：等待" + delayMs + "ms后再请求下一路USB授权，降低多路同时启动压力");
+            mUiHandler.postDelayed(mPermissionRequestRunnable, delayMs);
             return;
         }
 
@@ -411,6 +451,7 @@ public final class MainActivity extends Activity {
         mQueuedDeviceNames.remove(device.getDeviceName());
         mWaitingForPermission = true;
         mPermissionDeviceName = device.getDeviceName();
+        mLastPermissionRequestMs = now;
 
         updateStatus("正在请求USB授权：" + shortDeviceName(device));
         addLog("请求USB授权：" + shortDeviceName(device));
@@ -508,9 +549,11 @@ public final class MainActivity extends Activity {
         }
 
         UVCCamera camera = null;
+        final int openSequence = ++mOpenSequence;
         try {
             addLog("强诊断：准备打开第" + (slot.index + 1) + "路，设备="
-                + shortDeviceName(device) + "，surface=" + (slot.surface != null ? "已就绪" : "未就绪"));
+                + shortDeviceName(device) + "，打开序号=#" + openSequence
+                + "，surface=" + (slot.surface != null ? "已就绪" : "未就绪"));
             camera = new UVCCamera();
             camera.open(ctrlBlock);
             addLog("强诊断：第" + (slot.index + 1) + "路 native open 成功");
@@ -524,9 +567,10 @@ public final class MainActivity extends Activity {
                     + "次重开，策略=" + retryStrategyName(slot.noFrameRetryCount));
             }
             final PreviewChoice preview = choosePreviewSize(mjpegSizes, yuyvSizes,
-                slot.noFrameRetryCount >= 2);
+                slot.noFrameRetryCount > 0);
             final float bandwidthFactor = slot.noFrameRetryCount >= 2
                 ? RETRY_BANDWIDTH_FACTOR : BANDWIDTH_FACTOR;
+            final String previewReason = previewSelectionReason(preview);
             final int requestedFormat = preview.format;
             setPreviewSize(camera, preview, bandwidthFactor);
             if (preview.format != requestedFormat) {
@@ -535,7 +579,8 @@ public final class MainActivity extends Activity {
             }
             addLog("第" + (slot.index + 1) + "路优先低分辨率：选用 "
                 + preview.width + "x" + preview.height + " " + preview.formatName()
-                + "，" + previewSelectionReason(preview) + "，带宽系数=" + bandwidthFactor);
+                + "，" + previewReason + "，fps=" + PREVIEW_MIN_FPS + "-" + PREVIEW_MAX_FPS
+                + "，带宽系数=" + bandwidthFactor + "，打开序号=#" + openSequence);
 
             if (slot.texture.getSurfaceTexture() != null) {
                 slot.texture.getSurfaceTexture().setDefaultBufferSize(preview.width, preview.height);
@@ -551,6 +596,11 @@ public final class MainActivity extends Activity {
             slot.camera = camera;
             slot.preview = preview;
             slot.supportedSizeJson = supportedSize;
+            slot.openSequence = openSequence;
+            slot.bandwidthFactor = bandwidthFactor;
+            slot.previewReason = previewReason;
+            slot.openStrategy = slot.noFrameRetryCount > 0
+                ? retryStrategyName(slot.noFrameRetryCount) : "首次强低带宽打开";
             slot.status = "OPEN";
             slot.frameCount.set(0);
             slot.lastFrameCount = 0;
@@ -564,14 +614,16 @@ public final class MainActivity extends Activity {
             mOpenedByDeviceName.put(device.getDeviceName(), slot);
             if (mStreamHub != null) {
                 mStreamHub.onSlotOpened(slot.index, shortDeviceName(device), preview.width,
-                    preview.height, preview.formatName());
+                    preview.height, preview.formatName(), openSequence, PREVIEW_MIN_FPS,
+                    PREVIEW_MAX_FPS, bandwidthFactor, previewReason, LOW_BANDWIDTH_DIAGNOSTIC_MODE);
             }
             slot.startNoFrameRetryMonitor();
 
             Log.i(TAG, "Opened slot " + (slot.index + 1) + ": " + describeDevice(device));
             Log.i(TAG, "Supported sizes slot " + (slot.index + 1) + ": " + supportedSize);
             addLog("已打开第" + (slot.index + 1) + "路：" + shortDeviceName(device)
-                + " " + preview.width + "x" + preview.height + " " + preview.formatName());
+                + " " + preview.width + "x" + preview.height + " " + preview.formatName()
+                + "，打开序号=#" + openSequence);
             updateStatus("已打开摄像头：" + shortDeviceName(device));
         } catch (final Exception e) {
             Log.e(TAG, "Failed to open camera: " + describeDevice(device), e);
@@ -595,10 +647,11 @@ public final class MainActivity extends Activity {
     private void setPreviewSize(final UVCCamera camera, final PreviewChoice preview,
         final float bandwidthFactor) {
         try {
-            camera.setPreviewSize(preview.width, preview.height, 1, 31, preview.format, bandwidthFactor);
+            camera.setPreviewSize(preview.width, preview.height, PREVIEW_MIN_FPS, PREVIEW_MAX_FPS,
+                preview.format, bandwidthFactor);
         } catch (final IllegalArgumentException e) {
             if (preview.format == UVCCamera.FRAME_FORMAT_MJPEG) {
-                camera.setPreviewSize(preview.width, preview.height, 1, 31,
+                camera.setPreviewSize(preview.width, preview.height, PREVIEW_MIN_FPS, PREVIEW_MAX_FPS,
                     UVCCamera.FRAME_FORMAT_YUYV, bandwidthFactor);
                 preview.format = UVCCamera.FRAME_FORMAT_YUYV;
             } else {
@@ -614,29 +667,30 @@ public final class MainActivity extends Activity {
     }
 
     private PreviewChoice choosePreviewSize(final List<Size> mjpegSizes, final List<Size> yuyvSizes,
-        final boolean preferYuyv) {
+        final boolean retryLowBandwidth) {
         final List<PreviewChoice> candidates = new ArrayList<PreviewChoice>();
-        if (preferYuyv) {
-            addPreviewCandidates(candidates, yuyvSizes, UVCCamera.FRAME_FORMAT_YUYV);
-            addPreviewCandidates(candidates, mjpegSizes, UVCCamera.FRAME_FORMAT_MJPEG);
-        } else {
-            addPreviewCandidates(candidates, mjpegSizes, UVCCamera.FRAME_FORMAT_MJPEG);
-            addPreviewCandidates(candidates, yuyvSizes, UVCCamera.FRAME_FORMAT_YUYV);
-        }
+        addPreviewCandidates(candidates, mjpegSizes, UVCCamera.FRAME_FORMAT_MJPEG);
+        addPreviewCandidates(candidates, yuyvSizes, UVCCamera.FRAME_FORMAT_YUYV);
 
-        final PreviewChoice preview = choosePreviewCandidate(candidates, preferYuyv);
+        final PreviewChoice preview = (LOW_BANDWIDTH_DIAGNOSTIC_MODE || retryLowBandwidth)
+            ? chooseLowBandwidthPreviewCandidate(candidates)
+            : choosePreviewCandidate(candidates, false);
         if (preview != null) {
             return preview;
         }
 
+        if (LOW_BANDWIDTH_DIAGNOSTIC_MODE || retryLowBandwidth) {
+            return new PreviewChoice(LOW_BANDWIDTH_TARGET_WIDTH, LOW_BANDWIDTH_TARGET_HEIGHT,
+                UVCCamera.FRAME_FORMAT_MJPEG);
+        }
         return new PreviewChoice(TARGET_WIDTH, TARGET_HEIGHT, UVCCamera.FRAME_FORMAT_MJPEG);
     }
 
     private String retryStrategyName(final int retryCount) {
         if (retryCount >= 2) {
-            return "优先YUYV并降低带宽系数";
+            return "继续MJPEG优先并进一步降低带宽系数";
         }
-        return "同参数重开";
+        return "MJPEG低带宽错峰重开";
     }
 
     private String formatSizes(final List<Size> sizes) {
@@ -678,6 +732,25 @@ public final class MainActivity extends Activity {
         return bestUnderTarget != null ? bestUnderTarget : smallest;
     }
 
+    private PreviewChoice chooseLowBandwidthPreviewCandidate(final List<PreviewChoice> candidates) {
+        if (candidates == null || candidates.isEmpty()) return null;
+
+        PreviewChoice bestUnderTarget = null;
+        PreviewChoice smallest = null;
+        for (final PreviewChoice candidate : candidates) {
+            if (isBetterSmallest(candidate, smallest, false)) {
+                smallest = candidate;
+            }
+            if (candidate.width <= LOW_BANDWIDTH_TARGET_WIDTH
+                && candidate.height <= LOW_BANDWIDTH_TARGET_HEIGHT) {
+                if (isBetterUnderTarget(candidate, bestUnderTarget, false)) {
+                    bestUnderTarget = candidate;
+                }
+            }
+        }
+        return bestUnderTarget != null ? bestUnderTarget : smallest;
+    }
+
     private boolean isBetterSmallest(final PreviewChoice candidate, final PreviewChoice current,
         final boolean preferYuyv) {
         if (current == null) return true;
@@ -704,8 +777,16 @@ public final class MainActivity extends Activity {
     }
 
     private String previewSelectionReason(final PreviewChoice preview) {
+        if (LOW_BANDWIDTH_DIAGNOSTIC_MODE
+            && preview.width <= LOW_BANDWIDTH_TARGET_WIDTH
+            && preview.height <= LOW_BANDWIDTH_TARGET_HEIGHT) {
+            return "强低带宽诊断，优先压低USB压力";
+        }
         if (preview.width <= TARGET_WIDTH && preview.height <= TARGET_HEIGHT) {
             return "降低带宽压力";
+        }
+        if (LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
+            return "未找到320x240及以下，使用最小支持分辨率";
         }
         return "未找到640x480及以下，使用最小支持分辨率";
     }
@@ -791,10 +872,14 @@ public final class MainActivity extends Activity {
     }
 
     private void closeAllCameras() {
+        mUiHandler.removeCallbacks(mPermissionRequestRunnable);
         mPermissionQueue.clear();
         mQueuedDeviceNames.clear();
         mWaitingForPermission = false;
+        mPermissionRequestScheduled = false;
         mPermissionDeviceName = null;
+        mLastPermissionRequestMs = 0;
+        mOpenSequence = 0;
         mOpenedByDeviceName.clear();
         if (mSlots != null) {
             for (final CameraSlot slot : mSlots) {
@@ -951,6 +1036,10 @@ public final class MainActivity extends Activity {
         String retryDeviceName;
         long noFrameMonitorId;
         float fps;
+        int openSequence;
+        float bandwidthFactor;
+        String previewReason;
+        String openStrategy;
 
         CameraSlot(final int slotIndex) {
             index = slotIndex;
@@ -1137,13 +1226,13 @@ public final class MainActivity extends Activity {
                         return;
                     }
                     if (!retryPending || !retryDevice.getDeviceName().equals(retryDeviceName)) return;
-                    addLog("自动重试：第" + (index + 1) + "路重新请求打开 " + shortDeviceName(retryDevice));
-                    final boolean failed = mUSBMonitor.requestPermission(retryDevice);
-                    if (failed) {
-                        retryPending = false;
-                        addLog("自动重试：第" + (index + 1) + "路重新请求打开失败");
-                        refreshLabel();
+                    if (!mQueuedDeviceNames.contains(retryDevice.getDeviceName())) {
+                        mPermissionQueue.add(0, retryDevice);
+                        mQueuedDeviceNames.add(retryDevice.getDeviceName());
                     }
+                    addLog("自动重试：第" + (index + 1) + "路已回到授权队列 "
+                        + shortDeviceName(retryDevice) + "，等待错峰重开");
+                    requestNextPermissionIfNeeded();
                 }
             }, NO_FRAME_RETRY_DELAY_MS);
         }
@@ -1155,6 +1244,9 @@ public final class MainActivity extends Activity {
                 sb.append("\n")
                     .append(preview.width).append("x").append(preview.height)
                     .append(" ").append(preview.formatName());
+                if (openSequence > 0) {
+                    sb.append(" #").append(openSequence);
+                }
             }
             if (device != null) {
                 sb.append("\n").append(shortDeviceName(device));
@@ -1197,6 +1289,10 @@ public final class MainActivity extends Activity {
             device = null;
             preview = null;
             supportedSizeJson = null;
+            openSequence = 0;
+            bandwidthFactor = 0f;
+            previewReason = null;
+            openStrategy = null;
             fps = 0f;
             firstFrameLogged = false;
             lastFrameDebugLogMs = 0;

@@ -130,3 +130,24 @@
 - `docs/eight-camera-probe.md`: documented the independent retry monitor and its 5-second check result.
 - `progress.md`: appended this implementation and verification record.
 - Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.
+
+## 2026-06-23 - Task: Add low-bandwidth UVC diagnosis mode
+
+### What was done
+- Enabled a strong low-bandwidth diagnosis mode that keeps MJPEG first, prefers 320x240-or-lower preview sizes, requests 1-10 FPS, and uses lower UVC bandwidth factors.
+- Staggered USB permission/open requests by about 900 ms so multiple camera starts do not hit the USB scheduler at the same instant.
+- Changed no-frame retry to re-enter the same staggered open queue and keep MJPEG-first low-bandwidth behavior instead of switching to YUYV first.
+- Added per-route open sequence and selected open parameters to logs, labels, and `/cameras`, making it easier to see whether the failing route follows the last-opened slot or a specific USB device.
+- Updated field documentation with the new low-bandwidth mode, staggered opening, retry meaning, and remote diagnosis fields.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Checked IDE diagnostics for `MainActivity.java`, `CameraStreamHub.java`, `README.md`, and `docs/eight-camera-probe.md`; no diagnostics were reported.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: added strong low-bandwidth preview selection, 1-10 FPS preview requests, staggered permission/open scheduling, MJPEG-first retry queueing, and per-slot open sequence display.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java`: added open sequence, FPS request, bandwidth factor, low-bandwidth mode, and selection reason to stream readiness logs and `/cameras` JSON.
+- `README.md`: documented the strong low-bandwidth diagnosis behavior, staggered opening, retry interpretation, and new `/cameras` fields.
+- `docs/eight-camera-probe.md`: documented the updated field verification behavior and diagnosis fields.
+- `progress.md`: appended this implementation and verification record.
+- Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.
