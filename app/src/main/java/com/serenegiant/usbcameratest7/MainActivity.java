@@ -78,7 +78,8 @@ public final class MainActivity extends Activity {
     private static final int TARGET_HEIGHT = 480;
     private static final int USB_CLASS_VIDEO = 14;
     private static final int STREAM_PORT = 8080;
-    private static final int MAX_LOG_LINES = 160;
+    private static final int MAX_LOG_LINES = 220;
+    private static final long FRAME_DEBUG_LOG_INTERVAL_MS = 5000;
     private static final float BANDWIDTH_FACTOR = 0.5f;
 
     private final Handler mUiHandler = new Handler(Looper.getMainLooper());
@@ -485,11 +486,23 @@ public final class MainActivity extends Activity {
 
         UVCCamera camera = null;
         try {
+            addLog("强诊断：准备打开第" + (slot.index + 1) + "路，设备="
+                + shortDeviceName(device) + "，surface=" + (slot.surface != null ? "已就绪" : "未就绪"));
             camera = new UVCCamera();
             camera.open(ctrlBlock);
+            addLog("强诊断：第" + (slot.index + 1) + "路 native open 成功");
             final String supportedSize = camera.getSupportedSize();
-            final PreviewChoice preview = choosePreviewSize(supportedSize);
+            final List<Size> mjpegSizes = UVCCamera.getSupportedSize(6, supportedSize);
+            final List<Size> yuyvSizes = UVCCamera.getSupportedSize(4, supportedSize);
+            addLog("强诊断：第" + (slot.index + 1) + "路支持分辨率 MJPEG="
+                + formatSizes(mjpegSizes) + "；YUYV=" + formatSizes(yuyvSizes));
+            final PreviewChoice preview = choosePreviewSize(mjpegSizes, yuyvSizes);
+            final int requestedFormat = preview.format;
             setPreviewSize(camera, preview);
+            if (preview.format != requestedFormat) {
+                addLog("强诊断：第" + (slot.index + 1) + "路 MJPEG 设置失败，已切换为 "
+                    + preview.formatName());
+            }
             addLog("第" + (slot.index + 1) + "路优先低分辨率：选用 "
                 + preview.width + "x" + preview.height + " " + preview.formatName()
                 + "，" + previewSelectionReason(preview));
@@ -498,8 +511,11 @@ public final class MainActivity extends Activity {
                 slot.texture.getSurfaceTexture().setDefaultBufferSize(preview.width, preview.height);
             }
             camera.setPreviewDisplay(slot.surface);
+            addLog("强诊断：第" + (slot.index + 1) + "路预览窗口已绑定");
             camera.setFrameCallback(slot.frameCallback, UVCCamera.PIXEL_FORMAT_NV21);
+            addLog("强诊断：第" + (slot.index + 1) + "路帧回调已注册，格式=NV21");
             camera.startPreview();
+            addLog("强诊断：第" + (slot.index + 1) + "路 startPreview 已调用，等待帧回调");
 
             slot.device = device;
             slot.camera = camera;
@@ -509,6 +525,8 @@ public final class MainActivity extends Activity {
             slot.frameCount.set(0);
             slot.lastFrameCount = 0;
             slot.lastFpsTimestampMs = System.currentTimeMillis();
+            slot.firstFrameLogged = false;
+            slot.lastFrameDebugLogMs = 0;
             slot.refreshLabel();
             mOpenedByDeviceName.put(device.getDeviceName(), slot);
             if (mStreamHub != null) {
@@ -554,11 +572,14 @@ public final class MainActivity extends Activity {
     }
 
     private PreviewChoice choosePreviewSize(final String supportedSizeJson) {
-        final List<PreviewChoice> candidates = new ArrayList<PreviewChoice>();
         final List<Size> mjpegSizes = UVCCamera.getSupportedSize(6, supportedSizeJson);
-        addPreviewCandidates(candidates, mjpegSizes, UVCCamera.FRAME_FORMAT_MJPEG);
-
         final List<Size> yuyvSizes = UVCCamera.getSupportedSize(4, supportedSizeJson);
+        return choosePreviewSize(mjpegSizes, yuyvSizes);
+    }
+
+    private PreviewChoice choosePreviewSize(final List<Size> mjpegSizes, final List<Size> yuyvSizes) {
+        final List<PreviewChoice> candidates = new ArrayList<PreviewChoice>();
+        addPreviewCandidates(candidates, mjpegSizes, UVCCamera.FRAME_FORMAT_MJPEG);
         addPreviewCandidates(candidates, yuyvSizes, UVCCamera.FRAME_FORMAT_YUYV);
 
         final PreviewChoice preview = choosePreviewCandidate(candidates);
@@ -567,6 +588,16 @@ public final class MainActivity extends Activity {
         }
 
         return new PreviewChoice(TARGET_WIDTH, TARGET_HEIGHT, UVCCamera.FRAME_FORMAT_MJPEG);
+    }
+
+    private String formatSizes(final List<Size> sizes) {
+        if (sizes == null || sizes.isEmpty()) return "无";
+        final StringBuilder sb = new StringBuilder();
+        for (final Size size : sizes) {
+            if (sb.length() > 0) sb.append(", ");
+            sb.append(size.width).append('x').append(size.height);
+        }
+        return sb.toString();
     }
 
     private void addPreviewCandidates(final List<PreviewChoice> candidates, final List<Size> sizes,
@@ -802,6 +833,8 @@ public final class MainActivity extends Activity {
         String status = "EMPTY";
         long lastFrameCount;
         long lastFpsTimestampMs = System.currentTimeMillis();
+        boolean firstFrameLogged;
+        long lastFrameDebugLogMs;
         float fps;
 
         CameraSlot(final int slotIndex) {
@@ -860,8 +893,9 @@ public final class MainActivity extends Activity {
             frameCallback = new IFrameCallback() {
                 @Override
                 public void onFrame(final ByteBuffer frame) {
-                    frameCount.incrementAndGet();
+                    final long frames = frameCount.incrementAndGet();
                     final PreviewChoice currentPreview = preview;
+                    logFrameDiagnostic(frames, frame, currentPreview);
                     if (mStreamHub != null && currentPreview != null) {
                         mStreamHub.onFrame(index, frame, currentPreview.width, currentPreview.height);
                     }
@@ -872,6 +906,20 @@ public final class MainActivity extends Activity {
 
         boolean isFree() {
             return camera == null;
+        }
+
+        void logFrameDiagnostic(final long frames, final ByteBuffer frame, final PreviewChoice currentPreview) {
+            final long now = System.currentTimeMillis();
+            if (firstFrameLogged && now - lastFrameDebugLogMs < FRAME_DEBUG_LOG_INTERVAL_MS) return;
+            firstFrameLogged = true;
+            lastFrameDebugLogMs = now;
+            final int bufferBytes = frame != null ? frame.asReadOnlyBuffer().remaining() : -1;
+            final String previewText = currentPreview != null
+                ? currentPreview.width + "x" + currentPreview.height + " " + currentPreview.formatName()
+                : "预览参数未就绪";
+            addLog("强诊断：第" + (index + 1) + "路帧回调"
+                + (frames == 1 ? "首次到达" : "持续到达")
+                + "，帧数=" + frames + "，buffer=" + bufferBytes + "，" + previewText);
         }
 
         void refreshFps() {
@@ -928,6 +976,8 @@ public final class MainActivity extends Activity {
             preview = null;
             supportedSizeJson = null;
             fps = 0f;
+            firstFrameLogged = false;
+            lastFrameDebugLogMs = 0;
             frameCount.set(0);
             lastFrameCount = 0;
             status = surface != null ? "READY" : "EMPTY";

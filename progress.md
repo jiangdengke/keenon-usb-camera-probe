@@ -72,3 +72,22 @@
 - `docs/eight-camera-probe.md`: documented the bandwidth-reduction behavior and the log line to check when a route still has no video.
 - `progress.md`: appended this implementation and verification record.
 - Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.
+
+## 2026-06-23 - Task: Add strong UVC diagnostics logs
+
+### What was done
+- Added stronger Chinese diagnostics around each camera open phase, including native open, supported MJPEG/YUYV sizes, preview-size selection, preview binding, frame callback registration, and startPreview.
+- Added throttled frame and JPEG diagnostics so field logs can distinguish no frame callback, frame callback stall, frames without JPEG, JPEG delay, and normal streaming.
+- Extended the on-screen slot label and `/cameras` response with a diagnosis field plus recent frame age and buffer-size details.
+- Updated documentation to explain which strong diagnostics lines to check when one route still has no video.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: added strong open-stage and frame-callback diagnostics while keeping logs throttled to avoid per-frame spam.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java`: added JPEG generation diagnostics, health diagnosis text, and extra `/cameras` diagnostic fields.
+- `README.md`: documented the strong diagnostics behavior and common diagnosis meanings.
+- `docs/eight-camera-probe.md`: documented the strong diagnostics lines and remote `/cameras` fields for field verification.
+- `progress.md`: appended this implementation and verification record.
+- Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.

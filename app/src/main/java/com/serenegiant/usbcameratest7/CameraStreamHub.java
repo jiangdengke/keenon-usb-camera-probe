@@ -34,6 +34,7 @@ final class CameraStreamHub {
     private static final int JPEG_QUALITY = 60;
     private static final int MIN_JPEG_INTERVAL_MS = 200;
     private static final int CLIENT_IDLE_SLEEP_MS = 100;
+    private static final long DIAGNOSTIC_LOG_INTERVAL_MS = 5000;
     private static final String BOUNDARY = "keenonframe";
 
     private final SlotState[] mSlots;
@@ -112,8 +113,9 @@ final class CameraStreamHub {
     String getSlotLabelExtra(final int slotIndex) {
         if (!isValidSlot(slotIndex)) return "";
         final SlotState slot = mSlots[slotIndex];
+        final long now = System.currentTimeMillis();
         final long jpegAge = slot.latestJpegTimestampMs > 0
-            ? Math.max(0, System.currentTimeMillis() - slot.latestJpegTimestampMs) : -1;
+            ? Math.max(0, now - slot.latestJpegTimestampMs) : -1;
         final StringBuilder sb = new StringBuilder();
         sb.append("\n拉流=/stream/").append(slotIndex).append(".mjpeg");
         sb.append("\nJPEG帧=").append(slot.jpegCount.get());
@@ -122,6 +124,7 @@ final class CameraStreamHub {
         } else {
             sb.append(" 延迟=暂无");
         }
+        sb.append("\n诊断=").append(slot.diagnosis(now));
         return sb.toString();
     }
 
@@ -151,6 +154,10 @@ final class CameraStreamHub {
         slot.formatName = formatName;
         slot.latestJpegData = null;
         slot.latestJpegTimestampMs = 0;
+        slot.latestFrameCallbackMs = 0;
+        slot.lastFrameBufferBytes = 0;
+        slot.lastJpegSuccessLogMs = 0;
+        slot.lastJpegWarnLogMs = 0;
         slot.jpegCount.set(0);
         log("第" + (slotIndex + 1) + "路拉流已就绪：" + getStreamUrl(slotIndex));
     }
@@ -167,6 +174,10 @@ final class CameraStreamHub {
         slot.frameCount = 0;
         slot.latestJpegData = null;
         slot.latestJpegTimestampMs = 0;
+        slot.latestFrameCallbackMs = 0;
+        slot.lastFrameBufferBytes = 0;
+        slot.lastJpegSuccessLogMs = 0;
+        slot.lastJpegWarnLogMs = 0;
         slot.jpegCount.set(0);
     }
 
@@ -182,14 +193,20 @@ final class CameraStreamHub {
         if (!isValidSlot(slotIndex) || frame == null || width <= 0 || height <= 0) return;
         final SlotState slot = mSlots[slotIndex];
         final long now = System.currentTimeMillis();
+        final int expectedSize = width * height * 3 / 2;
+        final ByteBuffer source = frame.asReadOnlyBuffer();
+        source.clear();
+        slot.latestFrameCallbackMs = now;
+        slot.lastFrameBufferBytes = source.remaining();
         if (now - slot.lastJpegEncodeMs < MIN_JPEG_INTERVAL_MS) return;
         slot.lastJpegEncodeMs = now;
 
         try {
-            final int expectedSize = width * height * 3 / 2;
-            final ByteBuffer source = frame.asReadOnlyBuffer();
-            source.clear();
-            if (source.remaining() < expectedSize) return;
+            if (source.remaining() < expectedSize) {
+                logJpegWarning(slot, now, "第" + (slotIndex + 1) + "路帧数据不足：buffer="
+                    + source.remaining() + "，期望=" + expectedSize + "，可能是格式或回调数据异常");
+                return;
+            }
 
             final byte[] nv21 = new byte[expectedSize];
             source.get(nv21);
@@ -199,13 +216,25 @@ final class CameraStreamHub {
             if (yuvImage.compressToJpeg(new Rect(0, 0, width, height), JPEG_QUALITY, jpegOut)) {
                 slot.latestJpegData = jpegOut.toByteArray();
                 slot.latestJpegTimestampMs = now;
-                slot.jpegCount.incrementAndGet();
+                final long jpegFrames = slot.jpegCount.incrementAndGet();
+                if (jpegFrames == 1 || now - slot.lastJpegSuccessLogMs > DIAGNOSTIC_LOG_INTERVAL_MS) {
+                    slot.lastJpegSuccessLogMs = now;
+                    log("强诊断：第" + (slotIndex + 1) + "路JPEG已生成，JPEG帧="
+                        + jpegFrames + "，大小=" + slot.latestJpegData.length + "字节");
+                }
+            } else {
+                logJpegWarning(slot, now, "第" + (slotIndex + 1) + "路JPEG编码返回失败："
+                    + width + "x" + height + " NV21");
             }
         } catch (final Exception e) {
-            if (now - slot.lastJpegErrorLogMs > 5000) {
-                slot.lastJpegErrorLogMs = now;
-                log("第" + (slotIndex + 1) + "路JPEG编码失败：" + e.getMessage());
-            }
+            logJpegWarning(slot, now, "第" + (slotIndex + 1) + "路JPEG编码异常：" + e.getMessage());
+        }
+    }
+
+    private void logJpegWarning(final SlotState slot, final long now, final String message) {
+        if (now - slot.lastJpegWarnLogMs > DIAGNOSTIC_LOG_INTERVAL_MS) {
+            slot.lastJpegWarnLogMs = now;
+            log(message);
         }
     }
 
@@ -357,8 +386,12 @@ final class CameraStreamHub {
                 .append("\"format\":\"").append(jsonEscape(slot.formatName)).append("\",")
                 .append("\"frames\":").append(slot.frameCount).append(',')
                 .append("\"fps\":").append(String.format(Locale.US, "%.1f", slot.fps)).append(',')
+                .append("\"lastFrameAgeMs\":").append(slot.latestFrameCallbackMs > 0
+                    ? now - slot.latestFrameCallbackMs : -1).append(',')
+                .append("\"lastFrameBytes\":").append(slot.lastFrameBufferBytes).append(',')
                 .append("\"jpegFrames\":").append(slot.jpegCount.get()).append(',')
                 .append("\"jpegAgeMs\":").append(jpegAgeMs).append(',')
+                .append("\"diagnosis\":\"").append(jsonEscape(slot.diagnosis(now))).append("\",")
                 .append("\"stream\":\"/stream/").append(i).append(".mjpeg\",")
                 .append("\"snapshot\":\"/snapshot/").append(i).append(".jpg\",")
                 .append("\"streamUrl\":\"").append(jsonEscape(mBaseUrl)).append("/stream/")
@@ -475,8 +508,11 @@ final class CameraStreamHub {
         volatile float fps;
         volatile byte[] latestJpegData;
         volatile long latestJpegTimestampMs;
+        volatile long latestFrameCallbackMs;
+        volatile int lastFrameBufferBytes;
         volatile long lastJpegEncodeMs;
-        volatile long lastJpegErrorLogMs;
+        volatile long lastJpegSuccessLogMs;
+        volatile long lastJpegWarnLogMs;
 
         SlotState(final int slotIndex) {
             index = slotIndex;
@@ -488,9 +524,32 @@ final class CameraStreamHub {
             }
             final long age = latestJpegTimestampMs > 0
                 ? Math.max(0, System.currentTimeMillis() - latestJpegTimestampMs) : -1;
-            final String health = fps > 0f && age >= 0 && age < 3000 ? "正常" : "需检查";
-            return String.format(Locale.US, "第%d路=%s fps=%.1f JPEG延迟=%s",
-                index + 1, health, fps, age >= 0 ? Long.toString(age) + "ms" : "暂无");
+            final String health = "正常".equals(diagnosis(System.currentTimeMillis())) ? "正常" : "需检查";
+            return String.format(Locale.US, "第%d路=%s fps=%.1f 帧=%d JPEG=%d 延迟=%s 诊断=%s",
+                index + 1, health, fps, frameCount, jpegCount.get(),
+                age >= 0 ? Long.toString(age) + "ms" : "暂无", diagnosis(System.currentTimeMillis()));
+        }
+
+        private String diagnosis(final long now) {
+            if (!"OPEN".equals(status)) {
+                return displayStatus(status);
+            }
+            if (frameCount <= 0) {
+                return "无帧回调：优先查USB带宽/供电/格式";
+            }
+            if (latestFrameCallbackMs <= 0) {
+                return "已计帧但拉流未收到帧：检查预览参数绑定时序";
+            }
+            if (fps <= 0f) {
+                return "帧回调停滞：检查该路是否被USB或驱动卡住";
+            }
+            if (latestJpegTimestampMs <= 0) {
+                return "有帧但无JPEG：检查NV21数据或编码";
+            }
+            if (now - latestJpegTimestampMs >= 3000) {
+                return "JPEG延迟异常：HTTP拉流可能卡住";
+            }
+            return "正常";
         }
 
         private String displayStatus(final String rawStatus) {
