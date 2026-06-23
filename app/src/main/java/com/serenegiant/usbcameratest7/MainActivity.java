@@ -80,7 +80,11 @@ public final class MainActivity extends Activity {
     private static final int STREAM_PORT = 8080;
     private static final int MAX_LOG_LINES = 220;
     private static final long FRAME_DEBUG_LOG_INTERVAL_MS = 5000;
+    private static final long NO_FRAME_RETRY_WAIT_MS = 5000;
+    private static final long NO_FRAME_RETRY_DELAY_MS = 1200;
+    private static final int MAX_NO_FRAME_RETRIES = 2;
     private static final float BANDWIDTH_FACTOR = 0.5f;
+    private static final float RETRY_BANDWIDTH_FACTOR = 0.25f;
 
     private final Handler mUiHandler = new Handler(Looper.getMainLooper());
     private final List<UsbDevice> mPermissionQueue = new ArrayList<UsbDevice>();
@@ -318,7 +322,7 @@ public final class MainActivity extends Activity {
     private void trimPermissionQueueToVisibleSlots() {
         final int waitingCount = mPermissionDeviceName != null ? 1 : 0;
         final int allowedQueued = Math.max(0,
-            mVisibleSlotCount - mOpenedByDeviceName.size() - waitingCount);
+            mVisibleSlotCount - mOpenedByDeviceName.size() - waitingCount - countRetryPendingSlots());
         while (mPermissionQueue.size() > allowedQueued) {
             final UsbDevice removed = mPermissionQueue.remove(mPermissionQueue.size() - 1);
             mQueuedDeviceNames.remove(removed.getDeviceName());
@@ -365,7 +369,7 @@ public final class MainActivity extends Activity {
             addLog("发现USB设备：" + describeDevice(device));
         }
 
-        int queuedOrOpened = mOpenedByDeviceName.size() + mPermissionQueue.size()
+        int queuedOrOpened = mOpenedByDeviceName.size() + mPermissionQueue.size() + countRetryPendingSlots()
             + (mPermissionDeviceName != null ? 1 : 0);
         for (final UsbDevice device : uvcDevices) {
             if (!hasFreeSlot()) break;
@@ -373,7 +377,8 @@ public final class MainActivity extends Activity {
             final String deviceName = device.getDeviceName();
             if (mOpenedByDeviceName.containsKey(deviceName)
                 || mQueuedDeviceNames.contains(deviceName)
-                || deviceName.equals(mPermissionDeviceName)) {
+                || deviceName.equals(mPermissionDeviceName)
+                || isRetryPendingDevice(deviceName)) {
                 continue;
             }
             mPermissionQueue.add(device);
@@ -454,6 +459,12 @@ public final class MainActivity extends Activity {
         public void onDettach(final UsbDevice device) {
             Log.i(TAG, "onDettach: " + describeDevice(device));
             addLog("USB已拔出：" + shortDeviceName(device));
+            mUiHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    clearRetryPending(device);
+                }
+            });
         }
 
         @Override
@@ -465,6 +476,7 @@ public final class MainActivity extends Activity {
                 public void run() {
                     mWaitingForPermission = false;
                     mPermissionDeviceName = null;
+                    clearRetryPending(device);
                     updateStatus("USB授权已取消");
                     requestNextPermissionIfNeeded();
                 }
@@ -478,7 +490,7 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        final CameraSlot slot = findFreeReadySlot();
+        final CameraSlot slot = findFreeReadySlot(device);
         if (slot == null) {
             updateStatus("没有可用预览窗口，请关闭摄像头后重新扫描");
             return;
@@ -496,16 +508,23 @@ public final class MainActivity extends Activity {
             final List<Size> yuyvSizes = UVCCamera.getSupportedSize(4, supportedSize);
             addLog("强诊断：第" + (slot.index + 1) + "路支持分辨率 MJPEG="
                 + formatSizes(mjpegSizes) + "；YUYV=" + formatSizes(yuyvSizes));
-            final PreviewChoice preview = choosePreviewSize(mjpegSizes, yuyvSizes);
+            if (slot.noFrameRetryCount > 0) {
+                addLog("自动重试：第" + (slot.index + 1) + "路第" + slot.noFrameRetryCount
+                    + "次重开，策略=" + retryStrategyName(slot.noFrameRetryCount));
+            }
+            final PreviewChoice preview = choosePreviewSize(mjpegSizes, yuyvSizes,
+                slot.noFrameRetryCount >= 2);
+            final float bandwidthFactor = slot.noFrameRetryCount >= 2
+                ? RETRY_BANDWIDTH_FACTOR : BANDWIDTH_FACTOR;
             final int requestedFormat = preview.format;
-            setPreviewSize(camera, preview);
+            setPreviewSize(camera, preview, bandwidthFactor);
             if (preview.format != requestedFormat) {
                 addLog("强诊断：第" + (slot.index + 1) + "路 MJPEG 设置失败，已切换为 "
                     + preview.formatName());
             }
             addLog("第" + (slot.index + 1) + "路优先低分辨率：选用 "
                 + preview.width + "x" + preview.height + " " + preview.formatName()
-                + "，" + previewSelectionReason(preview));
+                + "，" + previewSelectionReason(preview) + "，带宽系数=" + bandwidthFactor);
 
             if (slot.texture.getSurfaceTexture() != null) {
                 slot.texture.getSurfaceTexture().setDefaultBufferSize(preview.width, preview.height);
@@ -525,8 +544,11 @@ public final class MainActivity extends Activity {
             slot.frameCount.set(0);
             slot.lastFrameCount = 0;
             slot.lastFpsTimestampMs = System.currentTimeMillis();
+            slot.openedAtMs = slot.lastFpsTimestampMs;
             slot.firstFrameLogged = false;
             slot.lastFrameDebugLogMs = 0;
+            slot.retryPending = false;
+            slot.retryLimitLogged = false;
             slot.refreshLabel();
             mOpenedByDeviceName.put(device.getDeviceName(), slot);
             if (mStreamHub != null) {
@@ -549,6 +571,7 @@ public final class MainActivity extends Activity {
                 }
             }
             slot.status = "OPEN FAILED: " + e.getMessage();
+            slot.retryPending = false;
             if (mStreamHub != null) {
                 mStreamHub.onSlotClosed(slot.index, slot.status);
             }
@@ -557,13 +580,14 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void setPreviewSize(final UVCCamera camera, final PreviewChoice preview) {
+    private void setPreviewSize(final UVCCamera camera, final PreviewChoice preview,
+        final float bandwidthFactor) {
         try {
-            camera.setPreviewSize(preview.width, preview.height, 1, 31, preview.format, BANDWIDTH_FACTOR);
+            camera.setPreviewSize(preview.width, preview.height, 1, 31, preview.format, bandwidthFactor);
         } catch (final IllegalArgumentException e) {
             if (preview.format == UVCCamera.FRAME_FORMAT_MJPEG) {
                 camera.setPreviewSize(preview.width, preview.height, 1, 31,
-                    UVCCamera.FRAME_FORMAT_YUYV, BANDWIDTH_FACTOR);
+                    UVCCamera.FRAME_FORMAT_YUYV, bandwidthFactor);
                 preview.format = UVCCamera.FRAME_FORMAT_YUYV;
             } else {
                 throw e;
@@ -574,20 +598,33 @@ public final class MainActivity extends Activity {
     private PreviewChoice choosePreviewSize(final String supportedSizeJson) {
         final List<Size> mjpegSizes = UVCCamera.getSupportedSize(6, supportedSizeJson);
         final List<Size> yuyvSizes = UVCCamera.getSupportedSize(4, supportedSizeJson);
-        return choosePreviewSize(mjpegSizes, yuyvSizes);
+        return choosePreviewSize(mjpegSizes, yuyvSizes, false);
     }
 
-    private PreviewChoice choosePreviewSize(final List<Size> mjpegSizes, final List<Size> yuyvSizes) {
+    private PreviewChoice choosePreviewSize(final List<Size> mjpegSizes, final List<Size> yuyvSizes,
+        final boolean preferYuyv) {
         final List<PreviewChoice> candidates = new ArrayList<PreviewChoice>();
-        addPreviewCandidates(candidates, mjpegSizes, UVCCamera.FRAME_FORMAT_MJPEG);
-        addPreviewCandidates(candidates, yuyvSizes, UVCCamera.FRAME_FORMAT_YUYV);
+        if (preferYuyv) {
+            addPreviewCandidates(candidates, yuyvSizes, UVCCamera.FRAME_FORMAT_YUYV);
+            addPreviewCandidates(candidates, mjpegSizes, UVCCamera.FRAME_FORMAT_MJPEG);
+        } else {
+            addPreviewCandidates(candidates, mjpegSizes, UVCCamera.FRAME_FORMAT_MJPEG);
+            addPreviewCandidates(candidates, yuyvSizes, UVCCamera.FRAME_FORMAT_YUYV);
+        }
 
-        final PreviewChoice preview = choosePreviewCandidate(candidates);
+        final PreviewChoice preview = choosePreviewCandidate(candidates, preferYuyv);
         if (preview != null) {
             return preview;
         }
 
         return new PreviewChoice(TARGET_WIDTH, TARGET_HEIGHT, UVCCamera.FRAME_FORMAT_MJPEG);
+    }
+
+    private String retryStrategyName(final int retryCount) {
+        if (retryCount >= 2) {
+            return "优先YUYV并降低带宽系数";
+        }
+        return "同参数重开";
     }
 
     private String formatSizes(final List<Size> sizes) {
@@ -608,7 +645,7 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private PreviewChoice choosePreviewCandidate(final List<PreviewChoice> candidates) {
+    private PreviewChoice choosePreviewCandidate(final List<PreviewChoice> candidates, final boolean preferYuyv) {
         if (candidates == null || candidates.isEmpty()) return null;
 
         PreviewChoice bestUnderTarget = null;
@@ -617,11 +654,11 @@ public final class MainActivity extends Activity {
             if (candidate.width == TARGET_WIDTH && candidate.height == TARGET_HEIGHT) {
                 return candidate;
             }
-            if (isBetterSmallest(candidate, smallest)) {
+            if (isBetterSmallest(candidate, smallest, preferYuyv)) {
                 smallest = candidate;
             }
             if (candidate.width <= TARGET_WIDTH && candidate.height <= TARGET_HEIGHT) {
-                if (isBetterUnderTarget(candidate, bestUnderTarget)) {
+                if (isBetterUnderTarget(candidate, bestUnderTarget, preferYuyv)) {
                     bestUnderTarget = candidate;
                 }
             }
@@ -629,22 +666,29 @@ public final class MainActivity extends Activity {
         return bestUnderTarget != null ? bestUnderTarget : smallest;
     }
 
-    private boolean isBetterSmallest(final PreviewChoice candidate, final PreviewChoice current) {
+    private boolean isBetterSmallest(final PreviewChoice candidate, final PreviewChoice current,
+        final boolean preferYuyv) {
         if (current == null) return true;
         final int candidateArea = area(candidate);
         final int currentArea = area(current);
         if (candidateArea != currentArea) return candidateArea < currentArea;
-        return candidate.format == UVCCamera.FRAME_FORMAT_MJPEG
-            && current.format != UVCCamera.FRAME_FORMAT_MJPEG;
+        return isPreferredFormat(candidate, current, preferYuyv);
     }
 
-    private boolean isBetterUnderTarget(final PreviewChoice candidate, final PreviewChoice current) {
+    private boolean isBetterUnderTarget(final PreviewChoice candidate, final PreviewChoice current,
+        final boolean preferYuyv) {
         if (current == null) return true;
         final int candidateArea = area(candidate);
         final int currentArea = area(current);
         if (candidateArea != currentArea) return candidateArea > currentArea;
-        return candidate.format == UVCCamera.FRAME_FORMAT_MJPEG
-            && current.format != UVCCamera.FRAME_FORMAT_MJPEG;
+        return isPreferredFormat(candidate, current, preferYuyv);
+    }
+
+    private boolean isPreferredFormat(final PreviewChoice candidate, final PreviewChoice current,
+        final boolean preferYuyv) {
+        final int preferredFormat = preferYuyv
+            ? UVCCamera.FRAME_FORMAT_YUYV : UVCCamera.FRAME_FORMAT_MJPEG;
+        return candidate.format == preferredFormat && current.format != preferredFormat;
     }
 
     private String previewSelectionReason(final PreviewChoice preview) {
@@ -671,10 +715,63 @@ public final class MainActivity extends Activity {
         return false;
     }
 
-    private CameraSlot findFreeReadySlot() {
+    private boolean isSlotVisible(final int slotIndex) {
+        return slotIndex >= 0 && slotIndex < mVisibleSlotCount;
+    }
+
+    private boolean isRetryPendingDevice(final String deviceName) {
+        if (deviceName == null || mSlots == null) return false;
         for (int i = 0; i < mVisibleSlotCount; i++) {
             final CameraSlot slot = mSlots[i];
-            if (slot.isFree() && slot.surface != null) {
+            if (slot.retryPending && deviceName.equals(slot.retryDeviceName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int countRetryPendingSlots() {
+        if (mSlots == null) return 0;
+        int count = 0;
+        for (int i = 0; i < mVisibleSlotCount; i++) {
+            if (mSlots[i].retryPending) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private void clearRetryPending(final UsbDevice device) {
+        if (device == null || mSlots == null) return;
+        final String deviceName = device.getDeviceName();
+        for (int i = 0; i < mVisibleSlotCount; i++) {
+            final CameraSlot slot = mSlots[i];
+            if (slot.retryPending && deviceName.equals(slot.retryDeviceName)) {
+                slot.retryPending = false;
+                slot.retryDeviceName = null;
+                slot.refreshLabel();
+            }
+        }
+    }
+
+    private CameraSlot findFreeReadySlot() {
+        return findFreeReadySlot(null);
+    }
+
+    private CameraSlot findFreeReadySlot(final UsbDevice preferredDevice) {
+        final String preferredDeviceName = preferredDevice != null ? preferredDevice.getDeviceName() : null;
+        if (preferredDeviceName != null) {
+            for (int i = 0; i < mVisibleSlotCount; i++) {
+                final CameraSlot slot = mSlots[i];
+                if (slot.isFree() && slot.surface != null
+                    && preferredDeviceName.equals(slot.retryDeviceName)) {
+                    return slot;
+                }
+            }
+        }
+        for (int i = 0; i < mVisibleSlotCount; i++) {
+            final CameraSlot slot = mSlots[i];
+            if (slot.isFree() && slot.surface != null && !slot.retryPending) {
                 return slot;
             }
         }
@@ -833,8 +930,13 @@ public final class MainActivity extends Activity {
         String status = "EMPTY";
         long lastFrameCount;
         long lastFpsTimestampMs = System.currentTimeMillis();
+        long openedAtMs;
         boolean firstFrameLogged;
         long lastFrameDebugLogMs;
+        int noFrameRetryCount;
+        boolean retryPending;
+        boolean retryLimitLogged;
+        String retryDeviceName;
         float fps;
 
         CameraSlot(final int slotIndex) {
@@ -913,6 +1015,13 @@ public final class MainActivity extends Activity {
             if (firstFrameLogged && now - lastFrameDebugLogMs < FRAME_DEBUG_LOG_INTERVAL_MS) return;
             firstFrameLogged = true;
             lastFrameDebugLogMs = now;
+            if (noFrameRetryCount > 0) {
+                addLog("自动重试：第" + (index + 1) + "路重试后已收到帧，帧数=" + frames);
+                noFrameRetryCount = 0;
+                retryDeviceName = null;
+                retryLimitLogged = false;
+            }
+            retryPending = false;
             final int bufferBytes = frame != null ? frame.asReadOnlyBuffer().remaining() : -1;
             final String previewText = currentPreview != null
                 ? currentPreview.width + "x" + currentPreview.height + " " + currentPreview.formatName()
@@ -934,7 +1043,45 @@ public final class MainActivity extends Activity {
             if (mStreamHub != null) {
                 mStreamHub.onSlotFps(index, status, frames, fps);
             }
+            checkNoFrameRetry(now, frames);
             refreshLabel();
+        }
+
+        void checkNoFrameRetry(final long now, final long frames) {
+            if (!"OPEN".equals(status) || camera == null || frames > 0 || retryPending) return;
+            if (openedAtMs <= 0 || now - openedAtMs < NO_FRAME_RETRY_WAIT_MS) return;
+            if (noFrameRetryCount >= MAX_NO_FRAME_RETRIES) {
+                if (!retryLimitLogged) {
+                    retryLimitLogged = true;
+                    addLog("自动重试：第" + (index + 1) + "路仍无帧，已达到最大重试次数，请检查USB带宽/供电/摄像头口");
+                }
+                return;
+            }
+            scheduleNoFrameRetry();
+        }
+
+        void scheduleNoFrameRetry() {
+            final UsbDevice retryDevice = device;
+            if (retryDevice == null || mUSBMonitor == null) return;
+            retryPending = true;
+            noFrameRetryCount++;
+            retryDeviceName = retryDevice.getDeviceName();
+            addLog("自动重试：第" + (index + 1) + "路打开后无帧，准备第" + noFrameRetryCount
+                + "次重开，策略=" + retryStrategyName(noFrameRetryCount));
+            closeCamera(false);
+        mUiHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (mUSBMonitor == null || !isSlotVisible(index)) return;
+                if (!retryPending || !retryDevice.getDeviceName().equals(retryDeviceName)) return;
+                addLog("自动重试：第" + (index + 1) + "路重新请求打开 " + shortDeviceName(retryDevice));
+                final boolean failed = mUSBMonitor.requestPermission(retryDevice);
+                if (failed) {
+                        retryPending = false;
+                        addLog("自动重试：第" + (index + 1) + "路重新请求打开失败");
+                    }
+                }
+            }, NO_FRAME_RETRY_DELAY_MS);
         }
 
         void refreshLabel() {
@@ -950,6 +1097,13 @@ public final class MainActivity extends Activity {
             }
             sb.append("\n帧数=").append(frameCount.get())
                 .append(" fps=").append(String.format(Locale.US, "%.1f", fps));
+            if (noFrameRetryCount > 0 || retryPending) {
+                sb.append("\n自动重试=").append(noFrameRetryCount)
+                    .append("/").append(MAX_NO_FRAME_RETRIES);
+                if (retryPending) {
+                    sb.append(" 等待重开");
+                }
+            }
             if (mStreamHub != null) {
                 sb.append(mStreamHub.getSlotLabelExtra(index));
             }
@@ -967,6 +1121,10 @@ public final class MainActivity extends Activity {
         }
 
         void closeCamera() {
+            closeCamera(true);
+        }
+
+        void closeCamera(final boolean resetRetryState) {
             final UVCCamera cameraToClose = camera;
             camera = null;
             if (device != null) {
@@ -978,6 +1136,13 @@ public final class MainActivity extends Activity {
             fps = 0f;
             firstFrameLogged = false;
             lastFrameDebugLogMs = 0;
+            openedAtMs = 0;
+            if (resetRetryState) {
+                retryPending = false;
+                retryLimitLogged = false;
+                noFrameRetryCount = 0;
+                retryDeviceName = null;
+            }
             frameCount.set(0);
             lastFrameCount = 0;
             status = surface != null ? "READY" : "EMPTY";

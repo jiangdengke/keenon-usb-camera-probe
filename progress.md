@@ -91,3 +91,22 @@
 - `docs/eight-camera-probe.md`: documented the strong diagnostics lines and remote `/cameras` fields for field verification.
 - `progress.md`: appended this implementation and verification record.
 - Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.
+
+## 2026-06-23 - Task: Add no-frame auto retry
+
+### What was done
+- Added automatic reopen for any opened camera slot that still has no frame callback after 5 seconds.
+- Limited no-frame recovery to 2 retries: the first retry reopens with the same strategy, and the second retry prefers YUYV with a lower bandwidth factor.
+- Kept the retrying device tied to its original slot while retry is pending, so the route number stays stable for field diagnosis.
+- Updated documentation to explain what first-retry recovery, second-retry recovery, and two-retry failure indicate.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Checked IDE diagnostics for `MainActivity.java`, `README.md`, and `docs/eight-camera-probe.md`; no diagnostics were reported.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: added no-frame retry timing, retry strategy selection, retry-state display, and retry-aware queue/slot handling.
+- `README.md`: documented no-frame auto retry and how to interpret each retry outcome in Chinese.
+- `docs/eight-camera-probe.md`: documented the retry behavior and field-diagnosis meaning for first retry, second retry, and persistent failure.
+- `progress.md`: appended this implementation and verification record.
+- Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.
