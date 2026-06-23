@@ -77,7 +77,7 @@ public final class MainActivity extends Activity {
     private static final int GRID_COLUMNS = 2;
     private static final int TARGET_WIDTH = 640;
     private static final int TARGET_HEIGHT = 480;
-    private static final boolean LOW_BANDWIDTH_DIAGNOSTIC_MODE = true;
+    private static final boolean LOW_BANDWIDTH_DIAGNOSTIC_MODE = false;
     private static final int LOW_BANDWIDTH_TARGET_WIDTH = 320;
     private static final int LOW_BANDWIDTH_TARGET_HEIGHT = 240;
     private static final int PREVIEW_MIN_FPS = 1;
@@ -142,6 +142,13 @@ public final class MainActivity extends Activity {
                 + "，失败回退fps=" + PREVIEW_COMPAT_MIN_FPS + "-" + PREVIEW_COMPAT_MAX_FPS
                 + "，低分辨率带宽系数=" + BANDWIDTH_FACTOR + "/" + RETRY_BANDWIDTH_FACTOR
                 + "，高分辨率回退=" + COMPAT_BANDWIDTH_FACTOR
+                + "，错峰=" + OPEN_STAGGER_DELAY_MS + "ms");
+        } else {
+            addLog("兼容恢复模式已启用：MJPEG优先，目标<="
+                + TARGET_WIDTH + "x" + TARGET_HEIGHT
+                + "，fps=UVCCamera默认" + UVCCamera.DEFAULT_PREVIEW_MIN_FPS
+                + "-" + UVCCamera.DEFAULT_PREVIEW_MAX_FPS
+                + "，带宽系数=" + COMPAT_BANDWIDTH_FACTOR
                 + "，错峰=" + OPEN_STAGGER_DELAY_MS + "ms");
         }
     }
@@ -591,7 +598,9 @@ public final class MainActivity extends Activity {
                 addLog("强诊断：第" + (slot.index + 1) + "路低FPS不兼容，已回退fps="
                     + previewSettings.fpsMin + "-" + previewSettings.fpsMax);
             }
-            addLog("第" + (slot.index + 1) + "路优先低分辨率：选用 "
+            addLog("第" + (slot.index + 1) + "路"
+                + (LOW_BANDWIDTH_DIAGNOSTIC_MODE ? "优先低分辨率" : "兼容参数")
+                + "：选用 "
                 + preview.width + "x" + preview.height + " " + preview.formatName()
                 + "，" + previewReason + "，fps=" + previewSettings.fpsMin + "-"
                 + previewSettings.fpsMax
@@ -615,7 +624,8 @@ public final class MainActivity extends Activity {
             slot.bandwidthFactor = bandwidthFactor;
             slot.previewReason = previewReason;
             slot.openStrategy = slot.noFrameRetryCount > 0
-                ? retryStrategyName(slot.noFrameRetryCount) : "首次强低带宽打开";
+                ? retryStrategyName(slot.noFrameRetryCount)
+                : (LOW_BANDWIDTH_DIAGNOSTIC_MODE ? "首次强低带宽打开" : "首次兼容参数打开");
             slot.previewFpsMin = previewSettings.fpsMin;
             slot.previewFpsMax = previewSettings.fpsMax;
             slot.fpsFallback = previewSettings.fpsFallback;
@@ -666,34 +676,20 @@ public final class MainActivity extends Activity {
     private PreviewSettings setPreviewSize(final UVCCamera camera, final PreviewChoice preview,
         final float bandwidthFactor, final int slotIndex) {
         try {
-            camera.setPreviewSize(preview.width, preview.height, PREVIEW_MIN_FPS, PREVIEW_MAX_FPS,
-                preview.format, bandwidthFactor);
-            return new PreviewSettings(PREVIEW_MIN_FPS, PREVIEW_MAX_FPS, false);
-        } catch (final IllegalArgumentException lowFpsError) {
-            addLog("强诊断：第" + (slotIndex + 1) + "路低FPS预览参数失败，格式="
-                + preview.formatName() + "，fps=" + PREVIEW_MIN_FPS + "-" + PREVIEW_MAX_FPS
-                + "，原因=" + lowFpsError.getMessage());
-            try {
-                camera.setPreviewSize(preview.width, preview.height, PREVIEW_COMPAT_MIN_FPS,
-                    PREVIEW_COMPAT_MAX_FPS, preview.format, bandwidthFactor);
-                return new PreviewSettings(PREVIEW_COMPAT_MIN_FPS, PREVIEW_COMPAT_MAX_FPS, true);
-            } catch (final IllegalArgumentException compatFpsError) {
-                if (preview.format != UVCCamera.FRAME_FORMAT_MJPEG) {
-                    throw compatFpsError;
-                }
-                addLog("强诊断：第" + (slotIndex + 1) + "路 MJPEG 兼容FPS仍失败，尝试YUYV");
-                preview.format = UVCCamera.FRAME_FORMAT_YUYV;
-                try {
-                    camera.setPreviewSize(preview.width, preview.height, PREVIEW_MIN_FPS,
-                        PREVIEW_MAX_FPS, preview.format, bandwidthFactor);
-                    return new PreviewSettings(PREVIEW_MIN_FPS, PREVIEW_MAX_FPS, false);
-                } catch (final IllegalArgumentException yuyvLowFpsError) {
-                    addLog("强诊断：第" + (slotIndex + 1) + "路 YUYV 低FPS也失败，回退兼容FPS");
-                    camera.setPreviewSize(preview.width, preview.height, PREVIEW_COMPAT_MIN_FPS,
-                        PREVIEW_COMPAT_MAX_FPS, preview.format, bandwidthFactor);
-                    return new PreviewSettings(PREVIEW_COMPAT_MIN_FPS, PREVIEW_COMPAT_MAX_FPS, true);
-                }
+            camera.setPreviewSize(preview.width, preview.height, preview.format, bandwidthFactor);
+            return new PreviewSettings(UVCCamera.DEFAULT_PREVIEW_MIN_FPS,
+                UVCCamera.DEFAULT_PREVIEW_MAX_FPS, false);
+        } catch (final IllegalArgumentException previewError) {
+            if (preview.format != UVCCamera.FRAME_FORMAT_MJPEG) {
+                throw previewError;
             }
+            addLog("强诊断：第" + (slotIndex + 1)
+                + "路 MJPEG 默认预览参数失败，尝试YUYV，原因="
+                + previewError.getMessage());
+            preview.format = UVCCamera.FRAME_FORMAT_YUYV;
+            camera.setPreviewSize(preview.width, preview.height, preview.format, bandwidthFactor);
+            return new PreviewSettings(UVCCamera.DEFAULT_PREVIEW_MIN_FPS,
+                UVCCamera.DEFAULT_PREVIEW_MAX_FPS, false);
         }
     }
 
@@ -709,14 +705,14 @@ public final class MainActivity extends Activity {
         addPreviewCandidates(candidates, mjpegSizes, UVCCamera.FRAME_FORMAT_MJPEG);
         addPreviewCandidates(candidates, yuyvSizes, UVCCamera.FRAME_FORMAT_YUYV);
 
-        final PreviewChoice preview = (LOW_BANDWIDTH_DIAGNOSTIC_MODE || retryLowBandwidth)
+        final PreviewChoice preview = LOW_BANDWIDTH_DIAGNOSTIC_MODE
             ? chooseLowBandwidthPreviewCandidate(candidates)
             : choosePreviewCandidate(candidates, false);
         if (preview != null) {
             return preview;
         }
 
-        if (LOW_BANDWIDTH_DIAGNOSTIC_MODE || retryLowBandwidth) {
+        if (LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
             return new PreviewChoice(LOW_BANDWIDTH_TARGET_WIDTH, LOW_BANDWIDTH_TARGET_HEIGHT,
                 UVCCamera.FRAME_FORMAT_MJPEG);
         }
@@ -724,6 +720,9 @@ public final class MainActivity extends Activity {
     }
 
     private float chooseBandwidthFactor(final PreviewChoice preview, final int retryCount) {
+        if (!LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
+            return COMPAT_BANDWIDTH_FACTOR;
+        }
         if (!LOW_BANDWIDTH_DIAGNOSTIC_MODE || isLowBandwidthPreview(preview)) {
             return retryCount >= 2 ? RETRY_BANDWIDTH_FACTOR : BANDWIDTH_FACTOR;
         }
@@ -737,6 +736,9 @@ public final class MainActivity extends Activity {
     }
 
     private String retryStrategyName(final int retryCount) {
+        if (!LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
+            return "兼容参数错峰重开";
+        }
         if (retryCount >= 2) {
             return "低分辨率继续降带宽，高分辨率保持兼容带宽";
         }
@@ -834,9 +836,9 @@ public final class MainActivity extends Activity {
             return "未找到320x240及以下，使用兼容带宽系数";
         }
         if (preview.width <= TARGET_WIDTH && preview.height <= TARGET_HEIGHT) {
-            return "降低带宽压力";
+            return "兼容恢复模式，使用UVCCamera默认预览参数";
         }
-        return "未找到640x480及以下，使用最小支持分辨率";
+        return "兼容恢复模式，未找到640x480及以下，使用最小支持分辨率";
     }
 
     private int area(final PreviewChoice preview) {

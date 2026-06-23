@@ -190,3 +190,22 @@
 - `docs/eight-camera-probe.md`: documented the field interpretation for high-resolution compatible bandwidth fallback.
 - `progress.md`: appended this implementation record.
 - Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.
+
+## 2026-06-23 - Task: Restore compatible UVC preview parameters
+
+### What was done
+- Disabled strong low-bandwidth diagnosis mode so the probe uses compatibility recovery parameters for field retesting.
+- Restored UVCCamera default preview FPS and a fixed 1.00 bandwidth factor while keeping MJPEG-first 640x480-or-lower preview selection.
+- Kept staggered opening, Chinese diagnostics, `/cameras`, and no-frame retry, but prevented retry from changing FPS or bandwidth parameters.
+- Updated README and field documentation to explain the compatibility recovery mode and how to interpret persistent no-frame routes.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Checked IDE diagnostics for `MainActivity.java`, `README.md`, `docs/eight-camera-probe.md`, and `progress.md`; no diagnostics were reported.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: switched to compatibility recovery mode with UVCCamera default FPS and 1.00 bandwidth factor.
+- `README.md`: documented the compatibility recovery mode and field interpretation.
+- `docs/eight-camera-probe.md`: documented the compatibility recovery mode for onsite verification.
+- `progress.md`: appended this implementation record.
+- Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.
