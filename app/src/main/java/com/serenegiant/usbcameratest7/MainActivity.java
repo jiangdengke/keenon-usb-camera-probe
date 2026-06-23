@@ -24,6 +24,7 @@
 package com.serenegiant.usbcameratest7;
 
 import android.app.Activity;
+import android.content.pm.PackageInfo;
 import android.graphics.Color;
 import android.graphics.SurfaceTexture;
 import android.hardware.usb.UsbDevice;
@@ -81,6 +82,7 @@ public final class MainActivity extends Activity {
     private static final int MAX_LOG_LINES = 220;
     private static final long FRAME_DEBUG_LOG_INTERVAL_MS = 5000;
     private static final long NO_FRAME_RETRY_WAIT_MS = 5000;
+    private static final long NO_FRAME_RETRY_FALLBACK_GRACE_MS = 1000;
     private static final long NO_FRAME_RETRY_DELAY_MS = 1200;
     private static final int MAX_NO_FRAME_RETRIES = 2;
     private static final float BANDWIDTH_FACTOR = 0.5f;
@@ -120,7 +122,7 @@ public final class MainActivity extends Activity {
                 addLog(message);
             }
         });
-        addLog("应用已启动，HTTP端口=" + STREAM_PORT);
+        addLog("应用已启动，版本=" + appVersionText() + "，HTTP端口=" + STREAM_PORT);
     }
 
     @Override
@@ -159,6 +161,15 @@ public final class MainActivity extends Activity {
             mUSBMonitor = null;
         }
         super.onDestroy();
+    }
+
+    private String appVersionText() {
+        try {
+            final PackageInfo packageInfo = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return packageInfo.versionName + "(" + packageInfo.versionCode + ")";
+        } catch (final Exception e) {
+            return "未知";
+        }
     }
 
     private View createContentView() {
@@ -555,6 +566,7 @@ public final class MainActivity extends Activity {
                 mStreamHub.onSlotOpened(slot.index, shortDeviceName(device), preview.width,
                     preview.height, preview.formatName());
             }
+            slot.startNoFrameRetryMonitor();
 
             Log.i(TAG, "Opened slot " + (slot.index + 1) + ": " + describeDevice(device));
             Log.i(TAG, "Supported sizes slot " + (slot.index + 1) + ": " + supportedSize);
@@ -937,6 +949,7 @@ public final class MainActivity extends Activity {
         boolean retryPending;
         boolean retryLimitLogged;
         String retryDeviceName;
+        long noFrameMonitorId;
         float fps;
 
         CameraSlot(final int slotIndex) {
@@ -1043,13 +1056,59 @@ public final class MainActivity extends Activity {
             if (mStreamHub != null) {
                 mStreamHub.onSlotFps(index, status, frames, fps);
             }
-            checkNoFrameRetry(now, frames);
+            checkNoFrameRetry(false);
             refreshLabel();
         }
 
-        void checkNoFrameRetry(final long now, final long frames) {
-            if (!"OPEN".equals(status) || camera == null || frames > 0 || retryPending) return;
-            if (openedAtMs <= 0 || now - openedAtMs < NO_FRAME_RETRY_WAIT_MS) return;
+        void startNoFrameRetryMonitor() {
+            final long monitorId = ++noFrameMonitorId;
+            addLog("自动重试监控：第" + (index + 1) + "路已启动，"
+                + (NO_FRAME_RETRY_WAIT_MS / 1000) + "秒后检查无帧状态");
+            mUiHandler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (monitorId != noFrameMonitorId) return;
+                    checkNoFrameRetry(true);
+                }
+            }, NO_FRAME_RETRY_WAIT_MS);
+        }
+
+        void checkNoFrameRetry(final boolean verbose) {
+            final long now = System.currentTimeMillis();
+            final long frames = frameCount.get();
+            if (verbose) {
+                addLog("自动重试监控：第" + (index + 1) + "路检查结果，状态=" + displayStatus(status)
+                    + "，frames=" + frames
+                    + "，fps=" + String.format(Locale.US, "%.1f", fps)
+                    + "，camera=" + (camera != null ? "存在" : "无")
+                    + "，retry=" + noFrameRetryCount + "/" + MAX_NO_FRAME_RETRIES);
+            }
+            if (!"OPEN".equals(status)) {
+                if (verbose) addLog("自动重试监控：第" + (index + 1) + "路未重试，当前不是已打开状态");
+                return;
+            }
+            if (camera == null) {
+                if (verbose) addLog("自动重试监控：第" + (index + 1) + "路未重试，camera为空");
+                return;
+            }
+            if (frames > 0) {
+                if (verbose) addLog("自动重试监控：第" + (index + 1) + "路已收到帧，不需要重试");
+                return;
+            }
+            if (retryPending) {
+                if (verbose) addLog("自动重试监控：第" + (index + 1) + "路已有重试请求在等待");
+                return;
+            }
+            if (openedAtMs <= 0) {
+                if (verbose) addLog("自动重试监控：第" + (index + 1) + "路未重试，打开时间未记录");
+                return;
+            }
+            final long requiredWaitMs = verbose
+                ? NO_FRAME_RETRY_WAIT_MS : NO_FRAME_RETRY_WAIT_MS + NO_FRAME_RETRY_FALLBACK_GRACE_MS;
+            if (now - openedAtMs < requiredWaitMs) {
+                if (verbose) addLog("自动重试监控：第" + (index + 1) + "路未到检查时间");
+                return;
+            }
             if (noFrameRetryCount >= MAX_NO_FRAME_RETRIES) {
                 if (!retryLimitLogged) {
                     retryLimitLogged = true;
@@ -1069,16 +1128,21 @@ public final class MainActivity extends Activity {
             addLog("自动重试：第" + (index + 1) + "路打开后无帧，准备第" + noFrameRetryCount
                 + "次重开，策略=" + retryStrategyName(noFrameRetryCount));
             closeCamera(false);
-        mUiHandler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (mUSBMonitor == null || !isSlotVisible(index)) return;
-                if (!retryPending || !retryDevice.getDeviceName().equals(retryDeviceName)) return;
-                addLog("自动重试：第" + (index + 1) + "路重新请求打开 " + shortDeviceName(retryDevice));
-                final boolean failed = mUSBMonitor.requestPermission(retryDevice);
-                if (failed) {
+            mUiHandler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (mUSBMonitor == null || !isSlotVisible(index)) {
+                        retryPending = false;
+                        refreshLabel();
+                        return;
+                    }
+                    if (!retryPending || !retryDevice.getDeviceName().equals(retryDeviceName)) return;
+                    addLog("自动重试：第" + (index + 1) + "路重新请求打开 " + shortDeviceName(retryDevice));
+                    final boolean failed = mUSBMonitor.requestPermission(retryDevice);
+                    if (failed) {
                         retryPending = false;
                         addLog("自动重试：第" + (index + 1) + "路重新请求打开失败");
+                        refreshLabel();
                     }
                 }
             }, NO_FRAME_RETRY_DELAY_MS);
@@ -1137,6 +1201,7 @@ public final class MainActivity extends Activity {
             firstFrameLogged = false;
             lastFrameDebugLogMs = 0;
             openedAtMs = 0;
+            noFrameMonitorId++;
             if (resetRetryState) {
                 retryPending = false;
                 retryLimitLogged = false;

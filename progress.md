@@ -110,3 +110,23 @@
 - `docs/eight-camera-probe.md`: documented the retry behavior and field-diagnosis meaning for first retry, second retry, and persistent failure.
 - `progress.md`: appended this implementation and verification record.
 - Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.
+
+## 2026-06-23 - Task: Strengthen no-frame retry monitor logs
+
+### What was done
+- Added the app version to the startup log so field users can confirm which APK is installed.
+- Added an independent no-frame retry monitor after each successful camera open, with a clear start log and a 5-second check-result log.
+- Logged the retry monitor decision inputs (`status`, `frames`, `fps`, `camera`, and retry count) so missing retries can be diagnosed from the on-device log.
+- Kept the FPS-loop retry path as a fallback with a short grace period, while the independent monitor remains the primary 5-second trigger.
+- Updated README and docs to explain the new `自动重试监控` lines.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Checked IDE diagnostics for `MainActivity.java`, `README.md`, and `docs/eight-camera-probe.md`; no diagnostics were reported.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: added startup version logging and independent no-frame retry monitor logging/triggering.
+- `README.md`: documented version logging and how to interpret `自动重试监控` lines.
+- `docs/eight-camera-probe.md`: documented the independent retry monitor and its 5-second check result.
+- `progress.md`: appended this implementation and verification record.
+- Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.

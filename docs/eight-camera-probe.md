@@ -9,6 +9,7 @@ The probe app now shows the detected USB UVC camera count, capped at 8 cameras.
 - The top bar has a Chinese log toggle next to scan and close controls.
 - The built-in strong diagnostics log records each slot's open phase, supported sizes, selected size, frame callback state, JPEG generation, and health diagnosis.
 - If an opened slot still has no frame callback after 5 seconds, the app automatically reopens that slot up to 2 times; the second retry prefers YUYV and uses a lower bandwidth factor to separate first-open timing, format/bandwidth pressure, and hardware/hub/driver issues.
+- The startup log prints the app version, and each opened slot prints an independent `自动重试监控` start line plus the 5-second check result.
 - Each camera open first prefers 640x480 or lower supported preview sizes to reduce USB bandwidth pressure across multiple cameras.
 - If a camera only advertises higher resolutions, the app uses that camera's smallest supported size and logs the selected size in Chinese.
 - The preview area is generated dynamically: 1 camera uses one tile, 2 or more cameras use 2 columns.
@@ -48,6 +49,7 @@ For stronger diagnosis, also check the Chinese `强诊断` lines:
 - `JPEG已生成` means the MJPEG/snapshot path has usable frames.
 - `无帧回调` points first to USB bandwidth, power, camera format, or driver blocking.
 - `有帧但无JPEG` means frames reached Java, but the NV21/JPEG encoding path needs further investigation.
+- `自动重试监控` means the independent no-frame check is active; its 5-second result logs status, frames, fps, camera state, and retry count so field users can see why retry did or did not trigger.
 - `自动重试` means the app detected an opened slot with no frame callback and reopened it. Recovery on the first retry points more to opening timing; recovery on the second YUYV low-bandwidth retry points more to format/bandwidth pressure; failure after both retries points more to hardware, hub, cable, or driver limits.
 - The `/cameras` endpoint includes `lastFrameAgeMs`, `lastFrameBytes`, and `diagnosis` fields for remote checks.
 
