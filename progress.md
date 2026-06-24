@@ -228,3 +228,23 @@
 - `docs/eight-camera-probe.md`: documented field interpretation for MJPEG-size and YUYV fallback logs.
 - `progress.md`: appended this implementation record.
 - Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.
+
+## 2026-06-24 - Task: Stabilize YUYV fallback diagnosis
+
+### What was done
+- Kept the beta.13 no-frame parameter ladder but made the YUYV fallback diagnostic-only.
+- Skipped preview surface binding for YUYV fallback to avoid green preview output and native preview crashes.
+- Added a stream-hub path that records YUYV frame arrival and buffer size without attempting NV21/JPEG encoding.
+- Updated field documentation to explain that YUYV frames prove the route can deliver data, while visible output still requires explicit YUYV transcoding.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Checked IDE diagnostics for `MainActivity.java`, `CameraStreamHub.java`, `README.md`, `docs/eight-camera-probe.md`, and `progress.md`; no diagnostics were reported.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: made YUYV fallback skip preview binding and route frames to format-only diagnostics.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java`: added format-only frame handling that updates frame health without JPEG generation.
+- `README.md`: documented diagnostic-only YUYV fallback.
+- `docs/eight-camera-probe.md`: documented diagnostic-only YUYV fallback for onsite verification.
+- `progress.md`: appended this implementation record.
+- Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.

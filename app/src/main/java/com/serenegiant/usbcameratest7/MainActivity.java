@@ -606,13 +606,20 @@ public final class MainActivity extends Activity {
                 + previewSettings.fpsMax
                 + "，带宽系数=" + bandwidthFactor + "，打开序号=#" + openSequence);
 
+            final boolean yuyvDiagnosticOnly = isYuyvDiagnosticPreview(preview);
             if (slot.texture.getSurfaceTexture() != null) {
                 slot.texture.getSurfaceTexture().setDefaultBufferSize(preview.width, preview.height);
             }
-            camera.setPreviewDisplay(slot.surface);
-            addLog("强诊断：第" + (slot.index + 1) + "路预览窗口已绑定");
+            if (yuyvDiagnosticOnly) {
+                addLog("强诊断：第" + (slot.index + 1)
+                    + "路YUYV诊断模式，不绑定预览窗口，避免YUYV绿屏或闪退");
+            } else {
+                camera.setPreviewDisplay(slot.surface);
+                addLog("强诊断：第" + (slot.index + 1) + "路预览窗口已绑定");
+            }
             camera.setFrameCallback(slot.frameCallback, UVCCamera.PIXEL_FORMAT_NV21);
-            addLog("强诊断：第" + (slot.index + 1) + "路帧回调已注册，格式=NV21");
+            addLog("强诊断：第" + (slot.index + 1) + "路帧回调已注册，格式=NV21"
+                + (yuyvDiagnosticOnly ? "，YUYV仅用于有帧诊断" : ""));
             camera.startPreview();
             addLog("强诊断：第" + (slot.index + 1) + "路 startPreview 已调用，等待帧回调");
 
@@ -783,6 +790,10 @@ public final class MainActivity extends Activity {
         return preview != null
             && preview.width <= LOW_BANDWIDTH_TARGET_WIDTH
             && preview.height <= LOW_BANDWIDTH_TARGET_HEIGHT;
+    }
+
+    private boolean isYuyvDiagnosticPreview(final PreviewChoice preview) {
+        return preview != null && preview.format == UVCCamera.FRAME_FORMAT_YUYV;
     }
 
     private String retryStrategyName(final int retryCount) {
@@ -1216,7 +1227,12 @@ public final class MainActivity extends Activity {
                     final PreviewChoice currentPreview = preview;
                     logFrameDiagnostic(frames, frame, currentPreview);
                     if (mStreamHub != null && currentPreview != null) {
-                        mStreamHub.onFrame(index, frame, currentPreview.width, currentPreview.height);
+                        if (isYuyvDiagnosticPreview(currentPreview)) {
+                            mStreamHub.onFormatOnlyFrame(index, frame, currentPreview.width,
+                                currentPreview.height, currentPreview.formatName());
+                        } else {
+                            mStreamHub.onFrame(index, frame, currentPreview.width, currentPreview.height);
+                        }
                     }
                 }
             };
@@ -1245,7 +1261,8 @@ public final class MainActivity extends Activity {
                 : "预览参数未就绪";
             addLog("强诊断：第" + (index + 1) + "路帧回调"
                 + (frames == 1 ? "首次到达" : "持续到达")
-                + "，帧数=" + frames + "，buffer=" + bufferBytes + "，" + previewText);
+                + "，帧数=" + frames + "，buffer=" + bufferBytes + "，" + previewText
+                + (isYuyvDiagnosticPreview(currentPreview) ? "，YUYV诊断帧不生成JPEG" : ""));
         }
 
         void refreshFps() {

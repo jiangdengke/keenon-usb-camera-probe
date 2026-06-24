@@ -208,6 +208,26 @@ final class CameraStreamHub {
         slot.fps = fps;
     }
 
+    void onFormatOnlyFrame(final int slotIndex, final ByteBuffer frame, final int width,
+        final int height, final String formatName) {
+        if (!isValidSlot(slotIndex) || frame == null || width <= 0 || height <= 0) return;
+        final SlotState slot = mSlots[slotIndex];
+        final long now = System.currentTimeMillis();
+        final ByteBuffer source = frame.asReadOnlyBuffer();
+        source.clear();
+        slot.latestFrameCallbackMs = now;
+        slot.lastFrameBufferBytes = source.remaining();
+        slot.formatName = formatName;
+        slot.latestJpegData = null;
+        slot.latestJpegTimestampMs = 0;
+        if (now - slot.lastJpegWarnLogMs > DIAGNOSTIC_LOG_INTERVAL_MS) {
+            slot.lastJpegWarnLogMs = now;
+            log("强诊断：第" + (slotIndex + 1) + "路" + formatName
+                + "诊断帧已到达，buffer=" + source.remaining()
+                + "，仅证明该格式有帧，暂不生成JPEG");
+        }
+    }
+
     void onFrame(final int slotIndex, final ByteBuffer frame, final int width, final int height) {
         if (!isValidSlot(slotIndex) || frame == null || width <= 0 || height <= 0) return;
         final SlotState slot = mSlots[slotIndex];
