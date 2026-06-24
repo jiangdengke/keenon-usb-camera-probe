@@ -209,3 +209,22 @@
 - `docs/eight-camera-probe.md`: documented the compatibility recovery mode for onsite verification.
 - `progress.md`: appended this implementation record.
 - Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.
+
+## 2026-06-23 - Task: Add UVC no-frame parameter ladder
+
+### What was done
+- Added a no-frame retry ladder for compatibility recovery mode: first retry tries another MJPEG resolution, and second retry tries YUYV.
+- Kept the first open on the beta.12-compatible 640x480-or-lower MJPEG, UVCCamera default FPS, and 1.00 bandwidth factor.
+- Added Chinese retry reasons so field users can tell whether the app is testing another MJPEG size or YUYV after a route has no frame callback.
+- Updated README and field documentation to explain how to interpret the MJPEG-size and YUYV fallback logs.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Checked IDE diagnostics for `MainActivity.java`, `README.md`, `docs/eight-camera-probe.md`, and `progress.md`; no diagnostics were reported.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: added retry-aware preview candidate selection for alternate MJPEG and YUYV attempts.
+- `README.md`: documented the no-frame parameter ladder.
+- `docs/eight-camera-probe.md`: documented field interpretation for MJPEG-size and YUYV fallback logs.
+- `progress.md`: appended this implementation record.
+- Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.

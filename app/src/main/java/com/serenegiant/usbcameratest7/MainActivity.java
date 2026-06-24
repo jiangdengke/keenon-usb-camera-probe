@@ -579,9 +579,9 @@ public final class MainActivity extends Activity {
                     + "次重开，策略=" + retryStrategyName(slot.noFrameRetryCount));
             }
             final PreviewChoice preview = choosePreviewSize(mjpegSizes, yuyvSizes,
-                slot.noFrameRetryCount > 0);
+                slot.noFrameRetryCount);
             final float bandwidthFactor = chooseBandwidthFactor(preview, slot.noFrameRetryCount);
-            final String previewReason = previewSelectionReason(preview);
+            final String previewReason = previewSelectionReason(preview, slot.noFrameRetryCount);
             if (LOW_BANDWIDTH_DIAGNOSTIC_MODE && !isLowBandwidthPreview(preview)) {
                 addLog("强诊断：第" + (slot.index + 1)
                     + "路未找到320x240及以下，改用兼容带宽系数="
@@ -696,18 +696,17 @@ public final class MainActivity extends Activity {
     private PreviewChoice choosePreviewSize(final String supportedSizeJson) {
         final List<Size> mjpegSizes = UVCCamera.getSupportedSize(6, supportedSizeJson);
         final List<Size> yuyvSizes = UVCCamera.getSupportedSize(4, supportedSizeJson);
-        return choosePreviewSize(mjpegSizes, yuyvSizes, false);
+        return choosePreviewSize(mjpegSizes, yuyvSizes, 0);
     }
 
     private PreviewChoice choosePreviewSize(final List<Size> mjpegSizes, final List<Size> yuyvSizes,
-        final boolean retryLowBandwidth) {
+        final int retryCount) {
         final List<PreviewChoice> candidates = new ArrayList<PreviewChoice>();
         addPreviewCandidates(candidates, mjpegSizes, UVCCamera.FRAME_FORMAT_MJPEG);
         addPreviewCandidates(candidates, yuyvSizes, UVCCamera.FRAME_FORMAT_YUYV);
 
-        final PreviewChoice preview = LOW_BANDWIDTH_DIAGNOSTIC_MODE
-            ? chooseLowBandwidthPreviewCandidate(candidates)
-            : choosePreviewCandidate(candidates, false);
+        final PreviewChoice preview = choosePreviewCandidateForRetry(candidates, mjpegSizes,
+            yuyvSizes, retryCount);
         if (preview != null) {
             return preview;
         }
@@ -717,6 +716,57 @@ public final class MainActivity extends Activity {
                 UVCCamera.FRAME_FORMAT_MJPEG);
         }
         return new PreviewChoice(TARGET_WIDTH, TARGET_HEIGHT, UVCCamera.FRAME_FORMAT_MJPEG);
+    }
+
+    private PreviewChoice choosePreviewCandidateForRetry(final List<PreviewChoice> candidates,
+        final List<Size> mjpegSizes, final List<Size> yuyvSizes, final int retryCount) {
+        if (LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
+            return chooseLowBandwidthPreviewCandidate(candidates);
+        }
+        if (retryCount == 1) {
+            final PreviewChoice alternateMjpeg = chooseAlternateMjpegPreviewCandidate(mjpegSizes);
+            return alternateMjpeg != null ? alternateMjpeg : choosePreviewCandidate(candidates, false);
+        }
+        if (retryCount >= 2) {
+            final PreviewChoice yuyv = chooseFormatPreviewCandidate(yuyvSizes,
+                UVCCamera.FRAME_FORMAT_YUYV);
+            if (yuyv != null) {
+                return yuyv;
+            }
+            final PreviewChoice alternateMjpeg = chooseAlternateMjpegPreviewCandidate(mjpegSizes);
+            return alternateMjpeg != null ? alternateMjpeg : choosePreviewCandidate(candidates, false);
+        }
+        return choosePreviewCandidate(candidates, false);
+    }
+
+    private PreviewChoice chooseAlternateMjpegPreviewCandidate(final List<Size> mjpegSizes) {
+        final List<PreviewChoice> candidates = new ArrayList<PreviewChoice>();
+        addPreviewCandidates(candidates, mjpegSizes, UVCCamera.FRAME_FORMAT_MJPEG);
+        if (candidates.isEmpty()) return null;
+
+        final int targetArea = TARGET_WIDTH * TARGET_HEIGHT;
+        PreviewChoice smallestAboveTarget = null;
+        PreviewChoice largestBelowTarget = null;
+        for (final PreviewChoice candidate : candidates) {
+            final int candidateArea = area(candidate);
+            if (candidate.width == TARGET_WIDTH && candidate.height == TARGET_HEIGHT) {
+                continue;
+            }
+            if (candidateArea > targetArea) {
+                if (smallestAboveTarget == null || candidateArea < area(smallestAboveTarget)) {
+                    smallestAboveTarget = candidate;
+                }
+            } else if (largestBelowTarget == null || candidateArea > area(largestBelowTarget)) {
+                largestBelowTarget = candidate;
+            }
+        }
+        return smallestAboveTarget != null ? smallestAboveTarget : largestBelowTarget;
+    }
+
+    private PreviewChoice chooseFormatPreviewCandidate(final List<Size> sizes, final int format) {
+        final List<PreviewChoice> candidates = new ArrayList<PreviewChoice>();
+        addPreviewCandidates(candidates, sizes, format);
+        return choosePreviewCandidate(candidates, format == UVCCamera.FRAME_FORMAT_YUYV);
     }
 
     private float chooseBandwidthFactor(final PreviewChoice preview, final int retryCount) {
@@ -737,7 +787,10 @@ public final class MainActivity extends Activity {
 
     private String retryStrategyName(final int retryCount) {
         if (!LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
-            return "兼容参数错峰重开";
+            if (retryCount >= 2) {
+                return "MJPEG仍无帧，改试YUYV兼容格式";
+            }
+            return "MJPEG无帧，改试其它MJPEG分辨率";
         }
         if (retryCount >= 2) {
             return "低分辨率继续降带宽，高分辨率保持兼容带宽";
@@ -828,12 +881,21 @@ public final class MainActivity extends Activity {
         return candidate.format == preferredFormat && current.format != preferredFormat;
     }
 
-    private String previewSelectionReason(final PreviewChoice preview) {
+    private String previewSelectionReason(final PreviewChoice preview, final int retryCount) {
         if (LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
             if (isLowBandwidthPreview(preview)) {
                 return "强低带宽诊断，优先压低USB压力";
             }
             return "未找到320x240及以下，使用兼容带宽系数";
+        }
+        if (retryCount == 1) {
+            return "MJPEG无帧，改试其它MJPEG分辨率";
+        }
+        if (retryCount >= 2) {
+            if (preview.format == UVCCamera.FRAME_FORMAT_YUYV) {
+                return "MJPEG仍无帧，改试YUYV兼容格式";
+            }
+            return "YUYV不可用，继续尝试MJPEG候选";
         }
         if (preview.width <= TARGET_WIDTH && preview.height <= TARGET_HEIGHT) {
             return "兼容恢复模式，使用UVCCamera默认预览参数";

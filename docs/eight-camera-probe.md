@@ -8,9 +8,9 @@ The probe app now shows the detected USB UVC camera count, capped at 8 cameras.
 - The safety cap remains 8 cameras; extra UVC devices are not opened.
 - The top bar has a Chinese log toggle next to scan and close controls.
 - The built-in strong diagnostics log records each slot's open phase, supported sizes, selected size, frame callback state, JPEG generation, and health diagnosis.
-- If an opened slot still has no frame callback after 5 seconds, the app automatically reopens that slot up to 2 times. In compatibility recovery mode, retries keep the same UVCCamera default FPS and 1.00 bandwidth factor so diagnosis parameters do not change the original field behavior.
+- If an opened slot still has no frame callback after 5 seconds, the app automatically reopens that slot up to 2 times. In compatibility recovery mode, retries first try another MJPEG size and then try YUYV so field users can see whether the route is size-specific, MJPEG-specific, or fully unavailable through third-party UVC.
 - The startup log prints the app version, and each opened slot prints an independent `自动重试监控` start line plus the 5-second check result.
-- Compatibility recovery mode is enabled: each camera open prefers 640x480 or lower MJPEG, uses UVCCamera's default 1-30 FPS range, and keeps the bandwidth factor at 1.00. This mode is meant to restore the closest earlier known-good parameter set before diagnosing the original single missing route.
+- Compatibility recovery mode is enabled: each camera open prefers 640x480 or lower MJPEG, uses UVCCamera's default 1-30 FPS range, and keeps the bandwidth factor at 1.00. If a route has no frames, the first retry tries another MJPEG size and the second retry tries YUYV.
 - The app staggers USB permission/open requests by about 900 ms so multiple `startPreview` calls do not hit the USB scheduler at the same instant.
 - If a camera only advertises higher resolutions, the app uses that camera's smallest supported size and logs the selected size in Chinese.
 - The preview area is generated dynamically: 1 camera uses one tile, 2 or more cameras use 2 columns.
@@ -53,7 +53,9 @@ For stronger diagnosis, also check the Chinese `强诊断` lines:
 - `自动重试监控` means the independent no-frame check is active; its 5-second result logs status, frames, fps, camera state, and retry count so field users can see why retry did or did not trigger.
 - `错峰打开` means the app is delaying the next USB permission request to reduce simultaneous multi-camera startup pressure.
 - `兼容恢复模式已启用` means the app is using UVCCamera's default FPS range and 1.00 bandwidth factor instead of the previous strong low-FPS or low-bandwidth diagnosis parameters.
-- `自动重试` means the app detected an opened slot with no frame callback and reopened it. Failure after both retries in compatibility recovery mode points more to hardware, hub, cable, or driver limits.
+- `MJPEG无帧，改试其它MJPEG分辨率` means the app is testing another MJPEG size after the initial 640x480 MJPEG route had no frame callback.
+- `MJPEG仍无帧，改试YUYV兼容格式` means MJPEG candidates still had no frame callback and the app is testing YUYV.
+- `自动重试` means the app detected an opened slot with no frame callback and reopened it. Failure after both MJPEG-size and YUYV retries points more to third-party UVC access or driver compatibility limits for that route.
 - The `/cameras` endpoint includes `openSequence`, `fpsMin`, `fpsMax`, `fpsFallback`, `bandwidthFactor`, `lowBandwidthMode`, `selectionReason`, `lastFrameAgeMs`, `lastFrameBytes`, and `diagnosis` fields for remote checks. Use `openSequence` to see whether the failed route is always the last opened slot.
 
 ## On-device logs
