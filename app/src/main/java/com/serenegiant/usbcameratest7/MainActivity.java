@@ -25,6 +25,8 @@ package com.serenegiant.usbcameratest7;
 
 import android.app.Activity;
 import android.content.pm.PackageInfo;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.SurfaceTexture;
 import android.hardware.usb.UsbDevice;
@@ -39,6 +41,7 @@ import android.view.TextureView;
 import android.view.View;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -92,6 +95,7 @@ public final class MainActivity extends Activity {
     private static final long NO_FRAME_RETRY_FALLBACK_GRACE_MS = 1000;
     private static final long NO_FRAME_RETRY_DELAY_MS = 1200;
     private static final long OPEN_STAGGER_DELAY_MS = 900;
+    private static final long JPEG_OVERLAY_UPDATE_INTERVAL_MS = 600;
     private static final int MAX_NO_FRAME_RETRIES = 2;
     private static final float BANDWIDTH_FACTOR = 0.20f;
     private static final float RETRY_BANDWIDTH_FACTOR = 0.10f;
@@ -611,9 +615,18 @@ public final class MainActivity extends Activity {
                 slot.texture.getSurfaceTexture().setDefaultBufferSize(preview.width, preview.height);
             }
             if (yuyvFallback) {
-                addLog("强诊断：第" + (slot.index + 1)
-                    + "路YUYV转JPEG模式，不绑定预览窗口，改走拉流/截图输出，避免YUYV绿屏或闪退");
+                final Surface hiddenSurface = slot.ensureHiddenPreviewSurface(preview.width, preview.height);
+                if (hiddenSurface != null) {
+                    camera.setPreviewDisplay(hiddenSurface);
+                    addLog("强诊断：第" + (slot.index + 1)
+                        + "路YUYV转JPEG模式，已绑定隐藏预览窗口引出帧回调，避免YUYV绿屏");
+                } else {
+                    camera.setPreviewDisplay(slot.surface);
+                    addLog("强诊断：第" + (slot.index + 1)
+                        + "路YUYV隐藏预览窗口未就绪，临时绑定可见预览窗口以引出帧回调");
+                }
             } else {
+                slot.clearJpegOverlay();
                 camera.setPreviewDisplay(slot.surface);
                 addLog("强诊断：第" + (slot.index + 1) + "路预览窗口已绑定");
             }
@@ -1138,11 +1151,14 @@ public final class MainActivity extends Activity {
         final int index;
         final FrameLayout container;
         final TextureView texture;
+        final TextureView hiddenTexture;
+        final ImageView jpegOverlay;
         final TextView label;
         final AtomicLong frameCount = new AtomicLong();
         final IFrameCallback frameCallback;
 
         Surface surface;
+        Surface hiddenSurface;
         UsbDevice device;
         UVCCamera camera;
         PreviewChoice preview;
@@ -1150,6 +1166,7 @@ public final class MainActivity extends Activity {
         String status = "EMPTY";
         long lastFrameCount;
         long lastFpsTimestampMs = System.currentTimeMillis();
+        long lastJpegOverlayUpdateMs;
         long openedAtMs;
         boolean firstFrameLogged;
         long lastFrameDebugLogMs;
@@ -1212,6 +1229,40 @@ public final class MainActivity extends Activity {
             container.addView(texture, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
+            hiddenTexture = new TextureView(MainActivity.this);
+            hiddenTexture.setAlpha(0f);
+            hiddenTexture.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+                @Override
+                public void onSurfaceTextureAvailable(final SurfaceTexture surfaceTexture,
+                    final int width, final int height) {
+                    hiddenSurface = new Surface(surfaceTexture);
+                }
+
+                @Override
+                public void onSurfaceTextureSizeChanged(final SurfaceTexture surfaceTexture,
+                    final int width, final int height) {
+                }
+
+                @Override
+                public boolean onSurfaceTextureDestroyed(final SurfaceTexture surfaceTexture) {
+                    releaseHiddenPreviewSurface();
+                    return true;
+                }
+
+                @Override
+                public void onSurfaceTextureUpdated(final SurfaceTexture surfaceTexture) {
+                }
+            });
+            container.addView(hiddenTexture, new FrameLayout.LayoutParams(1, 1,
+                Gravity.RIGHT | Gravity.BOTTOM));
+
+            jpegOverlay = new ImageView(MainActivity.this);
+            jpegOverlay.setBackgroundColor(Color.BLACK);
+            jpegOverlay.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            jpegOverlay.setVisibility(View.GONE);
+            container.addView(jpegOverlay, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
             label = new TextView(MainActivity.this);
             label.setTextColor(Color.WHITE);
             label.setTextSize(12);
@@ -1230,6 +1281,7 @@ public final class MainActivity extends Activity {
                         if (isYuyvFallbackPreview(currentPreview)) {
                             mStreamHub.onYuyvFrame(index, frame, currentPreview.width,
                                 currentPreview.height);
+                            updateJpegOverlayIfNeeded();
                         } else {
                             mStreamHub.onFrame(index, frame, currentPreview.width, currentPreview.height);
                         }
@@ -1241,6 +1293,48 @@ public final class MainActivity extends Activity {
 
         boolean isFree() {
             return camera == null;
+        }
+
+        Surface ensureHiddenPreviewSurface(final int width, final int height) {
+            final SurfaceTexture texture = hiddenTexture.getSurfaceTexture();
+            if (texture == null) return hiddenSurface;
+            texture.setDefaultBufferSize(width, height);
+            if (hiddenSurface == null) {
+                hiddenSurface = new Surface(texture);
+            }
+            return hiddenSurface;
+        }
+
+        void releaseHiddenPreviewSurface() {
+            if (hiddenSurface != null) {
+                hiddenSurface.release();
+                hiddenSurface = null;
+            }
+        }
+
+        void clearJpegOverlay() {
+            lastJpegOverlayUpdateMs = 0;
+            jpegOverlay.setImageDrawable(null);
+            jpegOverlay.setVisibility(View.GONE);
+        }
+
+        void updateJpegOverlayIfNeeded() {
+            if (mStreamHub == null) return;
+            final long now = System.currentTimeMillis();
+            if (now - lastJpegOverlayUpdateMs < JPEG_OVERLAY_UPDATE_INTERVAL_MS) return;
+            lastJpegOverlayUpdateMs = now;
+            final byte[] jpeg = mStreamHub.getLatestJpegData(index);
+            if (jpeg == null || jpeg.length == 0) return;
+            final Bitmap bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
+            if (bitmap == null) return;
+            mUiHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    if (preview == null || !isYuyvFallbackPreview(preview)) return;
+                    jpegOverlay.setImageBitmap(bitmap);
+                    jpegOverlay.setVisibility(View.VISIBLE);
+                }
+            });
         }
 
         void logFrameDiagnostic(final long frames, final ByteBuffer frame, final PreviewChoice currentPreview) {
@@ -1437,6 +1531,7 @@ public final class MainActivity extends Activity {
             fps = 0f;
             firstFrameLogged = false;
             lastFrameDebugLogMs = 0;
+            lastJpegOverlayUpdateMs = 0;
             openedAtMs = 0;
             noFrameMonitorId++;
             if (resetRetryState) {
@@ -1447,6 +1542,8 @@ public final class MainActivity extends Activity {
             }
             frameCount.set(0);
             lastFrameCount = 0;
+            clearJpegOverlay();
+            releaseHiddenPreviewSurface();
             status = surface != null ? "READY" : "EMPTY";
             if (mStreamHub != null) {
                 mStreamHub.onSlotClosed(index, status);

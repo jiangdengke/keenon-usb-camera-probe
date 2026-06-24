@@ -110,6 +110,11 @@ final class CameraStreamHub {
         return mBaseUrl + "/stream/" + slotIndex + ".mjpeg";
     }
 
+    byte[] getLatestJpegData(final int slotIndex) {
+        if (!isValidSlot(slotIndex)) return null;
+        return mSlots[slotIndex].latestJpegData;
+    }
+
     String getSlotLabelExtra(final int slotIndex) {
         if (!isValidSlot(slotIndex)) return "";
         final SlotState slot = mSlots[slotIndex];

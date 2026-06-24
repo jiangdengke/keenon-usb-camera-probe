@@ -268,3 +268,23 @@
 - `docs/eight-camera-probe.md`: documented YUYV-to-JPEG fallback behavior for onsite verification.
 - `progress.md`: appended this implementation record.
 - Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.
+
+## 2026-06-24 - Task: Add hidden-surface YUYV preview fallback
+
+### What was done
+- Kept YUYV from rendering directly into the visible preview surface to avoid green preview and native crashes.
+- Added a hidden 1x1 preview `TextureView`/`Surface` for YUYV fallback so UVCCamera can start native preview and trigger frame callbacks.
+- Reused the YUYV/NV21-to-JPEG stream path and added an on-tile JPEG overlay so onsite users can see fallback output directly in the app.
+- Updated field documentation to explain the hidden preview surface log and the expected JPEG/on-tile output behavior.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Checked implementation paths for hidden-surface YUYV fallback, JPEG overlay updates, and stale diagnostic-only documentation references.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: added hidden YUYV preview surface binding, JPEG overlay display, and cleanup on camera close.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java`: exposed latest JPEG data for in-app overlay display.
+- `README.md`: documented hidden-surface YUYV fallback behavior and onsite log interpretation.
+- `docs/eight-camera-probe.md`: documented hidden-surface YUYV fallback behavior for onsite verification.
+- `progress.md`: appended this implementation record.
+- Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.
