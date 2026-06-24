@@ -248,3 +248,23 @@
 - `docs/eight-camera-probe.md`: documented diagnostic-only YUYV fallback for onsite verification.
 - `progress.md`: appended this implementation record.
 - Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.
+
+## 2026-06-24 - Task: Add YUYV-to-JPEG fallback streaming
+
+### What was done
+- Kept the beta.14 safety behavior that skips preview surface binding for YUYV fallback to avoid green preview and native crashes.
+- Changed the YUYV fallback from diagnostic-only to HTTP-output capable by converting YUYV frames to NV21 and then JPEG.
+- Added a buffer-size guard so the fallback can also accept callbacks that native code already converted to NV21.
+- Updated field documentation to tell onsite users to check `YUYV转JPEG模式`, `来源=YUYV->NV21`, and increasing JPEG frame counts.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Checked implementation paths for stale YUYV diagnostic-only calls; no `onFormatOnlyFrame` or `isYuyvDiagnosticPreview` references remain.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: routes YUYV fallback frames to the YUYV-to-JPEG stream path while still skipping preview binding.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java`: added YUYV/NV21 fallback handling and shared NV21 JPEG encoding.
+- `README.md`: documented YUYV-to-JPEG fallback behavior and onsite log interpretation.
+- `docs/eight-camera-probe.md`: documented YUYV-to-JPEG fallback behavior for onsite verification.
+- `progress.md`: appended this implementation record.
+- Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.

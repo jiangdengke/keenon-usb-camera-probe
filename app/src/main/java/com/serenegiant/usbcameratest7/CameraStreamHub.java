@@ -208,8 +208,8 @@ final class CameraStreamHub {
         slot.fps = fps;
     }
 
-    void onFormatOnlyFrame(final int slotIndex, final ByteBuffer frame, final int width,
-        final int height, final String formatName) {
+    void onYuyvFrame(final int slotIndex, final ByteBuffer frame, final int width,
+        final int height) {
         if (!isValidSlot(slotIndex) || frame == null || width <= 0 || height <= 0) return;
         final SlotState slot = mSlots[slotIndex];
         final long now = System.currentTimeMillis();
@@ -217,14 +217,30 @@ final class CameraStreamHub {
         source.clear();
         slot.latestFrameCallbackMs = now;
         slot.lastFrameBufferBytes = source.remaining();
-        slot.formatName = formatName;
-        slot.latestJpegData = null;
-        slot.latestJpegTimestampMs = 0;
-        if (now - slot.lastJpegWarnLogMs > DIAGNOSTIC_LOG_INTERVAL_MS) {
-            slot.lastJpegWarnLogMs = now;
-            log("强诊断：第" + (slotIndex + 1) + "路" + formatName
-                + "诊断帧已到达，buffer=" + source.remaining()
-                + "，仅证明该格式有帧，暂不生成JPEG");
+        slot.formatName = "YUYV";
+        if (now - slot.lastJpegEncodeMs < MIN_JPEG_INTERVAL_MS) return;
+        slot.lastJpegEncodeMs = now;
+
+        try {
+            final int nv21Size = width * height * 3 / 2;
+            final int yuyvSize = width * height * 2;
+            final int bufferSize = source.remaining();
+            if (bufferSize < nv21Size) {
+                logJpegWarning(slot, now, "第" + (slotIndex + 1) + "路YUYV兜底帧数据不足：buffer="
+                    + bufferSize + "，NV21期望=" + nv21Size + "，YUYV期望=" + yuyvSize);
+                return;
+            }
+
+            final byte[] nv21 = new byte[nv21Size];
+            if (bufferSize >= yuyvSize) {
+                convertYuyvToNv21(source, nv21, width, height);
+                encodeNv21Jpeg(slotIndex, slot, now, nv21, width, height, "YUYV->NV21");
+            } else {
+                source.get(nv21);
+                encodeNv21Jpeg(slotIndex, slot, now, nv21, width, height, "NV21(YUYV兜底回调)");
+            }
+        } catch (final Exception e) {
+            logJpegWarning(slot, now, "第" + (slotIndex + 1) + "路YUYV转JPEG异常：" + e.getMessage());
         }
     }
 
@@ -250,23 +266,50 @@ final class CameraStreamHub {
             final byte[] nv21 = new byte[expectedSize];
             source.get(nv21);
 
-            final ByteArrayOutputStream jpegOut = new ByteArrayOutputStream(expectedSize / 4);
-            final YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, width, height, null);
-            if (yuvImage.compressToJpeg(new Rect(0, 0, width, height), JPEG_QUALITY, jpegOut)) {
-                slot.latestJpegData = jpegOut.toByteArray();
-                slot.latestJpegTimestampMs = now;
-                final long jpegFrames = slot.jpegCount.incrementAndGet();
-                if (jpegFrames == 1 || now - slot.lastJpegSuccessLogMs > DIAGNOSTIC_LOG_INTERVAL_MS) {
-                    slot.lastJpegSuccessLogMs = now;
-                    log("强诊断：第" + (slotIndex + 1) + "路JPEG已生成，JPEG帧="
-                        + jpegFrames + "，大小=" + slot.latestJpegData.length + "字节");
-                }
-            } else {
-                logJpegWarning(slot, now, "第" + (slotIndex + 1) + "路JPEG编码返回失败："
-                    + width + "x" + height + " NV21");
-            }
+            encodeNv21Jpeg(slotIndex, slot, now, nv21, width, height, "NV21");
         } catch (final Exception e) {
             logJpegWarning(slot, now, "第" + (slotIndex + 1) + "路JPEG编码异常：" + e.getMessage());
+        }
+    }
+
+    private void encodeNv21Jpeg(final int slotIndex, final SlotState slot, final long now,
+        final byte[] nv21, final int width, final int height, final String sourceFormat) {
+        final ByteArrayOutputStream jpegOut = new ByteArrayOutputStream(nv21.length / 4);
+        final YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, width, height, null);
+        if (yuvImage.compressToJpeg(new Rect(0, 0, width, height), JPEG_QUALITY, jpegOut)) {
+            slot.latestJpegData = jpegOut.toByteArray();
+            slot.latestJpegTimestampMs = now;
+            final long jpegFrames = slot.jpegCount.incrementAndGet();
+            if (jpegFrames == 1 || now - slot.lastJpegSuccessLogMs > DIAGNOSTIC_LOG_INTERVAL_MS) {
+                slot.lastJpegSuccessLogMs = now;
+                log("强诊断：第" + (slotIndex + 1) + "路JPEG已生成，来源="
+                    + sourceFormat + "，JPEG帧=" + jpegFrames
+                    + "，大小=" + slot.latestJpegData.length + "字节");
+            }
+        } else {
+            logJpegWarning(slot, now, "第" + (slotIndex + 1) + "路JPEG编码返回失败："
+                + width + "x" + height + " " + sourceFormat);
+        }
+    }
+
+    private void convertYuyvToNv21(final ByteBuffer yuyv, final byte[] nv21,
+        final int width, final int height) {
+        final int yPlaneSize = width * height;
+        final int inputRowStride = width * 2;
+        for (int row = 0; row < height; row++) {
+            final int inputRowOffset = row * inputRowStride;
+            final int outputYRowOffset = row * width;
+            for (int col = 0; col + 1 < width; col += 2) {
+                final int inputOffset = inputRowOffset + col * 2;
+                nv21[outputYRowOffset + col] = yuyv.get(inputOffset);
+                nv21[outputYRowOffset + col + 1] = yuyv.get(inputOffset + 2);
+
+                if ((row & 1) == 0) {
+                    final int outputUvOffset = yPlaneSize + (row / 2) * width + col;
+                    nv21[outputUvOffset] = yuyv.get(inputOffset + 3);
+                    nv21[outputUvOffset + 1] = yuyv.get(inputOffset + 1);
+                }
+            }
         }
     }
 
