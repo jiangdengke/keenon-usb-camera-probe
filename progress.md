@@ -288,3 +288,23 @@
 - `docs/eight-camera-probe.md`: documented hidden-surface YUYV fallback behavior for onsite verification.
 - `progress.md`: appended this implementation record.
 - Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.
+
+## 2026-06-24 - Task: Request RAW callbacks for YUYV fallback
+
+### What was done
+- Changed YUYV fallback frame callbacks from native `NV21` output to `RAW` output so Java can receive raw YUYV without relying on native YUYV-to-NV21 conversion.
+- Kept the hidden preview surface from beta.16 to satisfy UVCCamera's native preview pipeline while avoiding direct green YUYV preview output.
+- Reused the existing Java `YUYV -> NV21 -> JPEG` path for on-tile display, HTTP MJPEG streaming, and snapshots.
+- Updated field documentation so onsite users can identify beta.17 by `格式=RAW` and `YUYV RAW将转JPEG` logs.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Checked implementation and documentation paths for RAW YUYV fallback references.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: registers `PIXEL_FORMAT_RAW` for YUYV fallback and logs the RAW callback mode.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java`: continues to handle raw YUYV buffers and NV21-sized fallback buffers.
+- `README.md`: documented RAW YUYV fallback behavior and onsite log interpretation.
+- `docs/eight-camera-probe.md`: documented RAW YUYV fallback behavior for onsite verification.
+- `progress.md`: appended this implementation record.
+- Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.

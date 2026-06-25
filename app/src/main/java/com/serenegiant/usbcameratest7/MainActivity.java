@@ -630,9 +630,13 @@ public final class MainActivity extends Activity {
                 camera.setPreviewDisplay(slot.surface);
                 addLog("强诊断：第" + (slot.index + 1) + "路预览窗口已绑定");
             }
-            camera.setFrameCallback(slot.frameCallback, UVCCamera.PIXEL_FORMAT_NV21);
-            addLog("强诊断：第" + (slot.index + 1) + "路帧回调已注册，格式=NV21"
-                + (yuyvFallback ? "，YUYV将转JPEG拉流" : ""));
+            final int callbackPixelFormat = yuyvFallback
+                ? UVCCamera.PIXEL_FORMAT_RAW : UVCCamera.PIXEL_FORMAT_NV21;
+            final String callbackFormatName = yuyvFallback ? "RAW" : "NV21";
+            camera.setFrameCallback(slot.frameCallback, callbackPixelFormat);
+            addLog("强诊断：第" + (slot.index + 1) + "路帧回调已注册，格式="
+                + callbackFormatName
+                + (yuyvFallback ? "，YUYV RAW将由Java转JPEG拉流" : ""));
             camera.startPreview();
             addLog("强诊断：第" + (slot.index + 1) + "路 startPreview 已调用，等待帧回调");
 
@@ -1356,7 +1360,7 @@ public final class MainActivity extends Activity {
             addLog("强诊断：第" + (index + 1) + "路帧回调"
                 + (frames == 1 ? "首次到达" : "持续到达")
                 + "，帧数=" + frames + "，buffer=" + bufferBytes + "，" + previewText
-                + (isYuyvFallbackPreview(currentPreview) ? "，YUYV将转JPEG" : ""));
+                + (isYuyvFallbackPreview(currentPreview) ? "，YUYV RAW将转JPEG" : ""));
         }
 
         void refreshFps() {
