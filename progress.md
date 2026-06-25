@@ -308,3 +308,22 @@
 - `docs/eight-camera-probe.md`: documented RAW YUYV fallback behavior for onsite verification.
 - `progress.md`: appended this implementation record.
 - Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.
+
+## 2026-06-25 - Task: Use visible Surface for YUYV RAW fallback
+
+### What was done
+- Changed YUYV fallback to bind the real visible preview Surface again so UVCCamera can use the same native path that previously produced YUYV frames.
+- Kept RAW callbacks so Java still receives raw YUYV and performs `YUYV -> NV21 -> JPEG` without relying on native NV21 conversion.
+- Kept the on-tile JPEG overlay visible during YUYV fallback so the native green preview is covered until Java-produced JPEG frames appear.
+- Updated field documentation to explain the real-Surface-plus-overlay fallback and the logs to check onsite.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Checked implementation paths for visible-Surface YUYV fallback, RAW callback registration, and overlay documentation.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: binds YUYV fallback to the real preview Surface while enabling the overlay and RAW callback path.
+- `README.md`: documented visible-Surface YUYV RAW fallback behavior and onsite log interpretation.
+- `docs/eight-camera-probe.md`: documented visible-Surface YUYV RAW fallback behavior for onsite verification.
+- `progress.md`: appended this implementation record.
+- Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.

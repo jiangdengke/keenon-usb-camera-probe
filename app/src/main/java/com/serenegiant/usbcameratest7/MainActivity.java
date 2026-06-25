@@ -615,16 +615,10 @@ public final class MainActivity extends Activity {
                 slot.texture.getSurfaceTexture().setDefaultBufferSize(preview.width, preview.height);
             }
             if (yuyvFallback) {
-                final Surface hiddenSurface = slot.ensureHiddenPreviewSurface(preview.width, preview.height);
-                if (hiddenSurface != null) {
-                    camera.setPreviewDisplay(hiddenSurface);
-                    addLog("强诊断：第" + (slot.index + 1)
-                        + "路YUYV转JPEG模式，已绑定隐藏预览窗口引出帧回调，避免YUYV绿屏");
-                } else {
-                    camera.setPreviewDisplay(slot.surface);
-                    addLog("强诊断：第" + (slot.index + 1)
-                        + "路YUYV隐藏预览窗口未就绪，临时绑定可见预览窗口以引出帧回调");
-                }
+                slot.prepareYuyvVisibleSurfaceFallback();
+                camera.setPreviewDisplay(slot.surface);
+                addLog("强诊断：第" + (slot.index + 1)
+                    + "路YUYV RAW兜底，已绑定真实预览窗口引出帧回调，并用覆盖层遮挡绿屏");
             } else {
                 slot.clearJpegOverlay();
                 camera.setPreviewDisplay(slot.surface);
@@ -1320,6 +1314,13 @@ public final class MainActivity extends Activity {
             lastJpegOverlayUpdateMs = 0;
             jpegOverlay.setImageDrawable(null);
             jpegOverlay.setVisibility(View.GONE);
+        }
+
+        void prepareYuyvVisibleSurfaceFallback() {
+            lastJpegOverlayUpdateMs = 0;
+            jpegOverlay.setImageDrawable(null);
+            jpegOverlay.setBackgroundColor(Color.BLACK);
+            jpegOverlay.setVisibility(View.VISIBLE);
         }
 
         void updateJpegOverlayIfNeeded() {
