@@ -344,3 +344,23 @@
 - `docs/eight-camera-probe.md`: documented the bold yellow first-route log highlighting in the probe guide.
 - `progress.md`: appended this implementation record.
 - Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.
+
+## 2026-06-25 - Task: Add first-route Surface JPEG fallback
+
+### What was done
+- Added a first-route fallback that captures the real visible `TextureView` into JPEG when the preview Surface refreshes but Java `frameCallback` remains at zero.
+- Routed the captured JPEG frames into the existing `CameraStreamHub` so `/stream/0.mjpeg` and `/snapshot/0.jpg` can reuse the normal HTTP output path.
+- Kept the existing YUYV RAW callback and `YUYV -> NV21 -> JPEG` path unchanged; this fallback only runs when the first slot has no Java frames.
+- Added logs and diagnosis text for `Surface抓图JPEG已生成` / `来源=TextureView->JPEG` so field users can tell whether the Surface fallback produced a stream.
+- Updated field documentation to explain the Surface-capture fallback and the onsite stream/snapshot checks.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: captures first-slot visible `TextureView` frames into JPEG while `frameCallback` is still zero.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java`: accepts Surface-captured JPEG frames as an HTTP stream source and reports the fallback diagnosis.
+- `README.md`: documented first-route Surface JPEG fallback behavior and onsite verification logs.
+- `docs/eight-camera-probe.md`: documented first-route Surface JPEG fallback behavior in the probe guide.
+- `progress.md`: appended this implementation record.
+- Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.

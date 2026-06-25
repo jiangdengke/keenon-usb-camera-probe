@@ -58,6 +58,7 @@ import com.serenegiant.usb.USBMonitor.OnDeviceConnectListener;
 import com.serenegiant.usb.USBMonitor.UsbControlBlock;
 import com.serenegiant.usb.UVCCamera;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Date;
@@ -101,6 +102,9 @@ public final class MainActivity extends Activity {
     private static final long NO_FRAME_RETRY_DELAY_MS = 1200;
     private static final long OPEN_STAGGER_DELAY_MS = 900;
     private static final long JPEG_OVERLAY_UPDATE_INTERVAL_MS = 600;
+    private static final long SURFACE_CAPTURE_INTERVAL_MS = 500;
+    private static final long SURFACE_CAPTURE_LOG_INTERVAL_MS = 5000;
+    private static final int SURFACE_CAPTURE_JPEG_QUALITY = 60;
     private static final int MAX_NO_FRAME_RETRIES = 2;
     private static final int PRIMARY_SLOT_LOG_COLOR = Color.rgb(255, 230, 0);
     private static final float BANDWIDTH_FACTOR = 0.20f;
@@ -1193,6 +1197,10 @@ public final class MainActivity extends Activity {
         long lastFrameCount;
         long lastFpsTimestampMs = System.currentTimeMillis();
         long lastJpegOverlayUpdateMs;
+        long lastSurfaceCaptureMs;
+        long lastSurfaceCaptureLogMs;
+        long lastSurfaceCaptureJpegMs;
+        long surfaceCaptureJpegCount;
         long openedAtMs;
         boolean firstFrameLogged;
         long lastFrameDebugLogMs;
@@ -1250,6 +1258,7 @@ public final class MainActivity extends Activity {
 
                 @Override
                 public void onSurfaceTextureUpdated(final SurfaceTexture surfaceTexture) {
+                    handleVisibleSurfaceUpdated();
                 }
             });
             container.addView(texture, new FrameLayout.LayoutParams(
@@ -1370,6 +1379,63 @@ public final class MainActivity extends Activity {
             });
         }
 
+        void handleVisibleSurfaceUpdated() {
+            final PreviewChoice currentPreview = preview;
+            if (!shouldCaptureSurfaceFallback(currentPreview)) return;
+
+            final long now = System.currentTimeMillis();
+            if (now - lastSurfaceCaptureMs < SURFACE_CAPTURE_INTERVAL_MS) return;
+            lastSurfaceCaptureMs = now;
+            captureSurfaceJpegFallback(currentPreview, now);
+        }
+
+        boolean shouldCaptureSurfaceFallback(final PreviewChoice currentPreview) {
+            return index == 0
+                && mStreamHub != null
+                && "OPEN".equals(status)
+                && camera != null
+                && currentPreview != null
+                && frameCount.get() == 0;
+        }
+
+        void captureSurfaceJpegFallback(final PreviewChoice currentPreview, final long now) {
+            try {
+                final Bitmap bitmap = texture.getBitmap(currentPreview.width, currentPreview.height);
+                if (bitmap == null) {
+                    logSurfaceCaptureThrottled("强诊断：第1路Surface抓图失败：bitmap为空", now);
+                    return;
+                }
+
+                final ByteArrayOutputStream jpegOut = new ByteArrayOutputStream(
+                    Math.max(1024, bitmap.getWidth() * bitmap.getHeight() / 4));
+                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, SURFACE_CAPTURE_JPEG_QUALITY, jpegOut)) {
+                    logSurfaceCaptureThrottled("强诊断：第1路Surface抓图失败：JPEG压缩失败", now);
+                    return;
+                }
+
+                final byte[] jpeg = jpegOut.toByteArray();
+                mStreamHub.onSurfaceJpegFrame(index, jpeg, bitmap.getWidth(), bitmap.getHeight());
+                lastSurfaceCaptureJpegMs = now;
+                surfaceCaptureJpegCount++;
+                if (isYuyvFallbackPreview(currentPreview)) {
+                    jpegOverlay.setImageBitmap(bitmap);
+                    jpegOverlay.setVisibility(View.VISIBLE);
+                }
+                logSurfaceCaptureThrottled("强诊断：第1路Surface抓图兜底已生成JPEG，预览="
+                    + currentPreview.width + "x" + currentPreview.height + " "
+                    + currentPreview.formatName() + "，SurfaceJPEG=" + surfaceCaptureJpegCount
+                    + "，frameCallback仍为0", now);
+            } catch (final Exception e) {
+                logSurfaceCaptureThrottled("强诊断：第1路Surface抓图异常：" + e.getMessage(), now);
+            }
+        }
+
+        void logSurfaceCaptureThrottled(final String message, final long now) {
+            if (now - lastSurfaceCaptureLogMs < SURFACE_CAPTURE_LOG_INTERVAL_MS) return;
+            lastSurfaceCaptureLogMs = now;
+            addLog(message);
+        }
+
         void logFrameDiagnostic(final long frames, final ByteBuffer frame, final PreviewChoice currentPreview) {
             final long now = System.currentTimeMillis();
             if (firstFrameLogged && now - lastFrameDebugLogMs < FRAME_DEBUG_LOG_INTERVAL_MS) return;
@@ -1441,6 +1507,11 @@ public final class MainActivity extends Activity {
             }
             if (frames > 0) {
                 if (verbose) addLog("自动重试监控：第" + (index + 1) + "路已收到帧，不需要重试");
+                return;
+            }
+            if (lastSurfaceCaptureJpegMs > 0 && now - lastSurfaceCaptureJpegMs < 3000) {
+                if (verbose) addLog("自动重试监控：第" + (index + 1)
+                    + "路Surface抓图已生成JPEG，暂不重试，继续验证/stream/0.mjpeg");
                 return;
             }
             if (retryPending) {
@@ -1525,6 +1596,9 @@ public final class MainActivity extends Activity {
                     sb.append(" 等待重开");
                 }
             }
+            if (surfaceCaptureJpegCount > 0) {
+                sb.append("\nSurface抓图=").append(surfaceCaptureJpegCount);
+            }
             if (mStreamHub != null) {
                 sb.append(mStreamHub.getSlotLabelExtra(index));
             }
@@ -1565,6 +1639,10 @@ public final class MainActivity extends Activity {
             firstFrameLogged = false;
             lastFrameDebugLogMs = 0;
             lastJpegOverlayUpdateMs = 0;
+            lastSurfaceCaptureMs = 0;
+            lastSurfaceCaptureLogMs = 0;
+            lastSurfaceCaptureJpegMs = 0;
+            surfaceCaptureJpegCount = 0;
             openedAtMs = 0;
             noFrameMonitorId++;
             if (resetRetryState) {

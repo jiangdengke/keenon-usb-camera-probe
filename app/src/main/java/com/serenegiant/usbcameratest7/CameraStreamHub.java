@@ -115,6 +115,24 @@ final class CameraStreamHub {
         return mSlots[slotIndex].latestJpegData;
     }
 
+    void onSurfaceJpegFrame(final int slotIndex, final byte[] jpeg, final int width,
+        final int height) {
+        if (!isValidSlot(slotIndex) || jpeg == null || jpeg.length == 0) return;
+        final SlotState slot = mSlots[slotIndex];
+        final long now = System.currentTimeMillis();
+        slot.latestJpegData = jpeg;
+        slot.latestJpegTimestampMs = now;
+        slot.width = width;
+        slot.height = height;
+        slot.formatName = "SurfaceJPEG";
+        final long jpegFrames = slot.jpegCount.incrementAndGet();
+        if (jpegFrames == 1 || now - slot.lastJpegSuccessLogMs > DIAGNOSTIC_LOG_INTERVAL_MS) {
+            slot.lastJpegSuccessLogMs = now;
+            log("强诊断：第" + (slotIndex + 1) + "路Surface抓图JPEG已生成，来源=TextureView->JPEG"
+                + "，JPEG帧=" + jpegFrames + "，大小=" + jpeg.length + "字节");
+        }
+    }
+
     String getSlotLabelExtra(final int slotIndex) {
         if (!isValidSlot(slotIndex)) return "";
         final SlotState slot = mSlots[slotIndex];
@@ -637,6 +655,9 @@ final class CameraStreamHub {
                 return displayStatus(status);
             }
             if (frameCount <= 0) {
+                if (latestJpegTimestampMs > 0) {
+                    return "Surface抓图兜底：有JPEG流但无帧回调";
+                }
                 return "无帧回调：优先查USB带宽/供电/格式";
             }
             if (latestFrameCallbackMs <= 0) {
