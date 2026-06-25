@@ -64,3 +64,5 @@ For stronger diagnosis, also check the Chinese `强诊断` lines:
 Use the top-bar `显示日志` button to show the built-in log panel above the preview grid. The same button changes to `隐藏日志` when the panel is visible.
 
 The app-facing log text is localized for Chinese field users, including scan results, USB permission flow, camera open failures, MJPEG readiness, and health summaries.
+
+Logs related to the first slot are highlighted in bold yellow in the on-device log panel so field users can photograph the important lines more easily. These highlighted lines should be checked first for `格式=RAW`, `帧回调首次到达`, `buffer=614400`, and `JPEG已生成`.

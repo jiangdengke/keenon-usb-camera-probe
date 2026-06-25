@@ -327,3 +327,20 @@
 - `docs/eight-camera-probe.md`: documented visible-Surface YUYV RAW fallback behavior for onsite verification.
 - `progress.md`: appended this implementation record.
 - Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.
+
+## 2026-06-25 - Task: Highlight first-route logs for onsite photos
+
+### What was done
+- Changed the on-device log panel to render first-route related log lines in bold yellow so onsite users can photograph the important lines more easily.
+- Kept the existing camera open, YUYV RAW fallback, frame callback, and JPEG conversion logic unchanged.
+- Documented that field users should prioritize the highlighted first-route lines when checking `格式=RAW`, `帧回调首次到达`, `buffer=614400`, and `JPEG已生成`.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: renders first-route log lines with bold yellow spans in the in-app log panel.
+- `README.md`: documented the bold yellow first-route log highlighting for onsite verification.
+- `docs/eight-camera-probe.md`: documented the bold yellow first-route log highlighting in the probe guide.
+- `progress.md`: appended this implementation record.
+- Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.

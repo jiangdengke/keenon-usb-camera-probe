@@ -29,11 +29,16 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.SurfaceTexture;
+import android.graphics.Typeface;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbInterface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.StyleSpan;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.Surface;
@@ -97,6 +102,7 @@ public final class MainActivity extends Activity {
     private static final long OPEN_STAGGER_DELAY_MS = 900;
     private static final long JPEG_OVERLAY_UPDATE_INTERVAL_MS = 600;
     private static final int MAX_NO_FRAME_RETRIES = 2;
+    private static final int PRIMARY_SLOT_LOG_COLOR = Color.rgb(255, 230, 0);
     private static final float BANDWIDTH_FACTOR = 0.20f;
     private static final float RETRY_BANDWIDTH_FACTOR = 0.10f;
     private static final float COMPAT_BANDWIDTH_FACTOR = 1.00f;
@@ -1126,11 +1132,7 @@ public final class MainActivity extends Activity {
             mLogLines.remove(0);
         }
         if (mLogText == null) return;
-        final StringBuilder sb = new StringBuilder();
-        for (final String logLine : mLogLines) {
-            sb.append(logLine).append('\n');
-        }
-        mLogText.setText(sb.toString());
+        mLogText.setText(buildStyledLogText());
         if (mLogScroll != null) {
             mLogScroll.post(new Runnable() {
                 @Override
@@ -1139,6 +1141,32 @@ public final class MainActivity extends Activity {
                 }
             });
         }
+    }
+
+    private SpannableStringBuilder buildStyledLogText() {
+        final SpannableStringBuilder builder = new SpannableStringBuilder();
+        for (final String logLine : mLogLines) {
+            final int start = builder.length();
+            builder.append(logLine).append('\n');
+            final int end = builder.length();
+            if (isPrimarySlotLogLine(logLine)) {
+                builder.setSpan(new ForegroundColorSpan(PRIMARY_SLOT_LOG_COLOR), start, end,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                builder.setSpan(new StyleSpan(Typeface.BOLD), start, end,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+        }
+        return builder;
+    }
+
+    private boolean isPrimarySlotLogLine(final String logLine) {
+        if (logLine == null) return false;
+        return logLine.contains("第1路")
+            || logLine.contains("第 1 路")
+            || logLine.contains("/stream/0.mjpeg")
+            || logLine.contains("/snapshot/0.jpg")
+            || logLine.contains("[1]")
+            || logLine.contains("S1=");
     }
 
     private int dp(final int value) {
