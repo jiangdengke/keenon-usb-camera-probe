@@ -6,7 +6,7 @@ The probe app now shows the detected USB UVC camera count, capped at 8 cameras.
 
 - The app scans USB devices and displays one preview slot per detected UVC camera.
 - The safety cap remains 8 cameras; extra UVC devices are not opened.
-- The top bar has a Chinese log toggle next to scan and close controls.
+- The top bar has scan, close, first-slot-only, and Chinese log toggle controls.
 - The built-in strong diagnostics log records each slot's open phase, supported sizes, selected size, frame callback state, JPEG generation, and health diagnosis.
 - If an opened slot still has no frame callback after 5 seconds, the app automatically reopens that slot up to 2 times. In compatibility recovery mode, retries first try another MJPEG size and then try YUYV. The YUYV fallback binds the real visible preview surface to drive native frame delivery, covers direct green preview output with an overlay, and requests RAW callbacks so Java can convert raw YUYV to JPEG for the on-tile overlay, HTTP streaming, and snapshots. If the first slot's real preview Surface refreshes while Java frame callbacks remain at zero, the app also tries to capture the `TextureView` into JPEG as a fallback source for `/stream/0.mjpeg`.
 - The startup log prints the app version, and each opened slot prints an independent `自动重试监控` start line plus the 5-second check result.
@@ -42,6 +42,8 @@ USB=8 UVC=8 opened=8/8 max=8 pending=0
 Actual stability still depends on robot USB bandwidth, hub power, camera format, and UVC driver support.
 
 When one route still has no video, open `显示日志` and check the selected size line for that slot. In compatibility recovery mode, a persistent no-frame route after two retries should be checked against USB topology, hub power, cable, or the camera itself.
+
+To check whether the first route is blocked by multi-camera concurrency, tap `只开第1路`. The app closes the other routes, opens only the first scanned UVC device, and keeps `/stream/0.mjpeg` as the verification endpoint.
 
 For stronger diagnosis, also check the Chinese `强诊断` lines:
 

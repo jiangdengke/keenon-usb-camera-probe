@@ -364,3 +364,21 @@
 - `docs/eight-camera-probe.md`: documented first-route Surface JPEG fallback behavior in the probe guide.
 - `progress.md`: appended this implementation record.
 - Rollback: revert this task's changes in the five files above, or restore the previous commit/state before this task.
+
+## 2026-06-26 - Task: Add first-route only open mode
+
+### What was done
+- Added a top-bar `只开第1路` button that closes other slots and opens only the first scanned UVC device.
+- Kept the existing all-camera `扫描/打开` behavior available; tapping it exits first-route-only mode and opens the detected UVC set normally.
+- Added in-app logs and status text so onsite users can tell when first-route-only mode is active.
+- Updated field documentation to explain using `/stream/0.mjpeg` as the verification endpoint in first-route-only mode.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: added the first-route-only button and scan limiting logic while preserving normal multi-camera scanning.
+- `README.md`: documented the `只开第1路` button and its onsite verification purpose.
+- `docs/eight-camera-probe.md`: documented first-route-only mode in the probe guide.
+- `progress.md`: appended this implementation record.
+- Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.

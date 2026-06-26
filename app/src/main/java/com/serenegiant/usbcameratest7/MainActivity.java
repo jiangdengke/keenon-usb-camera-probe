@@ -122,6 +122,7 @@ public final class MainActivity extends Activity {
     private TextView mStatusText;
     private TextView mServerText;
     private Button mLogButton;
+    private Button mFirstOnlyButton;
     private LinearLayout mSlotGrid;
     private LinearLayout[] mSlotRows;
     private TextView mLogText;
@@ -136,6 +137,7 @@ public final class MainActivity extends Activity {
     private int mVisibleSlotCount;
     private long mLastHealthLogMs;
     private int mOpenSequence;
+    private boolean mFirstSlotOnlyMode;
 
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
@@ -232,6 +234,7 @@ public final class MainActivity extends Activity {
         scanButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(final View v) {
+                mFirstSlotOnlyMode = false;
                 scanAndRequestUvcDevices();
             }
         });
@@ -249,6 +252,18 @@ public final class MainActivity extends Activity {
             }
         });
         topBar.addView(closeButton, new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        mFirstOnlyButton = new Button(this);
+        mFirstOnlyButton.setText("只开第1路");
+        mFirstOnlyButton.setAllCaps(false);
+        mFirstOnlyButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(final View v) {
+                openFirstSlotOnly();
+            }
+        });
+        topBar.addView(mFirstOnlyButton, new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         mLogButton = new Button(this);
@@ -342,6 +357,13 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void openFirstSlotOnly() {
+        mFirstSlotOnlyMode = true;
+        addLog("第1路独占模式：将关闭其它路，只打开扫描到的第1个UVC设备验证/stream/0.mjpeg");
+        closeAllCameras();
+        scanAndRequestUvcDevices();
+    }
+
     private void updateVisibleSlots(final int requestedSlotCount) {
         final int slotCount = Math.max(0, Math.min(requestedSlotCount, MAX_CAMERAS));
         if (mSlotRows == null || mSlots == null) return;
@@ -423,10 +445,14 @@ public final class MainActivity extends Activity {
 
         mLastUsbCount = allDevices.size();
         mLastUvcCount = uvcDevices.size();
-        updateVisibleSlots(Math.min(mLastUvcCount, MAX_CAMERAS));
+        final int slotLimit = mFirstSlotOnlyMode ? 1 : MAX_CAMERAS;
+        updateVisibleSlots(Math.min(mLastUvcCount, slotLimit));
 
         Log.i(TAG, "USB devices=" + allDevices.size() + ", UVC candidates=" + uvcDevices.size());
         addLog("扫描结果：USB设备=" + allDevices.size() + "，UVC摄像头=" + uvcDevices.size());
+        if (mFirstSlotOnlyMode) {
+            addLog("第1路独占模式已启用：本次只会请求第1个UVC设备授权，其它UVC不打开");
+        }
         for (final UsbDevice device : allDevices) {
             Log.i(TAG, describeDevice(device));
             addLog("发现USB设备：" + describeDevice(device));
@@ -1089,6 +1115,9 @@ public final class MainActivity extends Activity {
             .append("/").append(mVisibleSlotCount)
             .append(" max=").append(MAX_CAMERAS)
             .append(" pending=").append(mPermissionQueue.size());
+        if (mFirstSlotOnlyMode) {
+            sb.append(" 第1路独占");
+        }
         if (mWaitingForPermission) {
             sb.append(" 等待授权");
         }
