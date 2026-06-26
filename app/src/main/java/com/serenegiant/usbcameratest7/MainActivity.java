@@ -1165,8 +1165,9 @@ public final class MainActivity extends Activity {
             mLogLines.remove(0);
         }
         if (mLogText == null) return;
+        final boolean autoScroll = shouldAutoScrollLog();
         mLogText.setText(buildStyledLogText());
-        if (mLogScroll != null) {
+        if (mLogScroll != null && autoScroll) {
             mLogScroll.post(new Runnable() {
                 @Override
                 public void run() {
@@ -1174,6 +1175,14 @@ public final class MainActivity extends Activity {
                 }
             });
         }
+    }
+
+    private boolean shouldAutoScrollLog() {
+        if (mLogScroll == null || mLogScroll.getChildCount() == 0) return true;
+        final View child = mLogScroll.getChildAt(0);
+        final int distanceFromBottom = child.getBottom()
+            - (mLogScroll.getHeight() + mLogScroll.getScrollY());
+        return distanceFromBottom <= dp(12);
     }
 
     private SpannableStringBuilder buildStyledLogText() {
@@ -1428,27 +1437,37 @@ public final class MainActivity extends Activity {
         }
 
         void captureSurfaceJpegFallback(final PreviewChoice currentPreview, final long now) {
+            Bitmap bitmap = null;
             try {
-                final Bitmap bitmap = texture.getBitmap(currentPreview.width, currentPreview.height);
+                bitmap = texture.getBitmap(currentPreview.width, currentPreview.height);
                 if (bitmap == null) {
                     logSurfaceCaptureThrottled("强诊断：第1路Surface抓图失败：bitmap为空", now);
                     return;
                 }
+                if (bitmap.isRecycled()) {
+                    logSurfaceCaptureThrottled("强诊断：第1路Surface抓图失败：bitmap已回收", now);
+                    return;
+                }
+                final int bitmapWidth = bitmap.getWidth();
+                final int bitmapHeight = bitmap.getHeight();
 
                 final ByteArrayOutputStream jpegOut = new ByteArrayOutputStream(
-                    Math.max(1024, bitmap.getWidth() * bitmap.getHeight() / 4));
+                    Math.max(1024, bitmapWidth * bitmapHeight / 4));
                 if (!bitmap.compress(Bitmap.CompressFormat.JPEG, SURFACE_CAPTURE_JPEG_QUALITY, jpegOut)) {
                     logSurfaceCaptureThrottled("强诊断：第1路Surface抓图失败：JPEG压缩失败", now);
                     return;
                 }
 
                 final byte[] jpeg = jpegOut.toByteArray();
-                mStreamHub.onSurfaceJpegFrame(index, jpeg, bitmap.getWidth(), bitmap.getHeight());
+                mStreamHub.onSurfaceJpegFrame(index, jpeg, bitmapWidth, bitmapHeight);
                 lastSurfaceCaptureJpegMs = now;
                 surfaceCaptureJpegCount++;
                 if (isYuyvFallbackPreview(currentPreview)) {
-                    jpegOverlay.setImageBitmap(bitmap);
-                    jpegOverlay.setVisibility(View.VISIBLE);
+                    final Bitmap overlayBitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
+                    if (overlayBitmap != null) {
+                        jpegOverlay.setImageBitmap(overlayBitmap);
+                        jpegOverlay.setVisibility(View.VISIBLE);
+                    }
                 }
                 logSurfaceCaptureThrottled("强诊断：第1路Surface抓图兜底已生成JPEG，预览="
                     + currentPreview.width + "x" + currentPreview.height + " "
@@ -1456,6 +1475,10 @@ public final class MainActivity extends Activity {
                     + "，frameCallback仍为0", now);
             } catch (final Exception e) {
                 logSurfaceCaptureThrottled("强诊断：第1路Surface抓图异常：" + e.getMessage(), now);
+            } finally {
+                if (bitmap != null && !bitmap.isRecycled()) {
+                    bitmap.recycle();
+                }
             }
         }
 

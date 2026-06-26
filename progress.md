@@ -382,3 +382,21 @@
 - `docs/eight-camera-probe.md`: documented first-route-only mode in the probe guide.
 - `progress.md`: appended this implementation record.
 - Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.
+
+## 2026-06-26 - Task: Stabilize beta22 onsite diagnostics
+
+### What was done
+- Changed the on-device log panel so new log lines only auto-scroll when the panel is already near the bottom. Field users can now scroll upward and photograph older highlighted first-route lines without being forced back down.
+- Hardened the first-route Surface JPEG fallback by keeping bitmap width/height before recycling and recycling the captured bitmap in a single cleanup path, avoiding stale `bitmap已回收` behavior from blocking JPEG output.
+- Kept the existing camera open order, first-route-only mode, YUYV RAW fallback, and HTTP `/stream/0.mjpeg` / `/snapshot/0.jpg` output path unchanged.
+- Updated field documentation to explain that manual log scrolling is stable and that `Surface抓图JPEG已生成` / `来源=TextureView->JPEG` means the first route should be tested through the HTTP stream and snapshot endpoints.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: preserves manual log scroll position unless the log panel is already at the bottom, and stabilizes Surface-capture bitmap cleanup.
+- `README.md`: documented stable manual log scrolling and first-route Surface JPEG verification.
+- `docs/eight-camera-probe.md`: documented stable manual log scrolling in the probe guide.
+- `progress.md`: appended this implementation record.
+- Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.
