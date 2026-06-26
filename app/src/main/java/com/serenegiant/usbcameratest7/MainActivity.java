@@ -106,6 +106,7 @@ public final class MainActivity extends Activity {
     private static final long SURFACE_CAPTURE_LOG_INTERVAL_MS = 5000;
     private static final int SURFACE_CAPTURE_JPEG_QUALITY = 60;
     private static final int MAX_NO_FRAME_RETRIES = 2;
+    private static final int MAX_FIRST_SLOT_FULL_PROBE_RETRIES = 10;
     private static final int PRIMARY_SLOT_LOG_COLOR = Color.rgb(255, 230, 0);
     private static final float BANDWIDTH_FACTOR = 0.20f;
     private static final float RETRY_BANDWIDTH_FACTOR = 0.10f;
@@ -616,12 +617,13 @@ public final class MainActivity extends Activity {
                 + formatSizes(mjpegSizes) + "；YUYV=" + formatSizes(yuyvSizes));
             if (slot.noFrameRetryCount > 0) {
                 addLog("自动重试：第" + (slot.index + 1) + "路第" + slot.noFrameRetryCount
-                    + "次重开，策略=" + retryStrategyName(slot.noFrameRetryCount));
+                    + "次重开，策略=" + retryStrategyName(slot.noFrameRetryCount, slot.index));
             }
             final PreviewChoice preview = choosePreviewSize(mjpegSizes, yuyvSizes,
-                slot.noFrameRetryCount);
+                slot.noFrameRetryCount, slot.index);
             final float bandwidthFactor = chooseBandwidthFactor(preview, slot.noFrameRetryCount);
-            final String previewReason = previewSelectionReason(preview, slot.noFrameRetryCount);
+            final String previewReason = previewSelectionReason(preview, slot.noFrameRetryCount,
+                slot.index);
             if (LOW_BANDWIDTH_DIAGNOSTIC_MODE && !isLowBandwidthPreview(preview)) {
                 addLog("强诊断：第" + (slot.index + 1)
                     + "路未找到320x240及以下，改用兼容带宽系数="
@@ -678,7 +680,7 @@ public final class MainActivity extends Activity {
             slot.bandwidthFactor = bandwidthFactor;
             slot.previewReason = previewReason;
             slot.openStrategy = slot.noFrameRetryCount > 0
-                ? retryStrategyName(slot.noFrameRetryCount)
+                ? retryStrategyName(slot.noFrameRetryCount, slot.index)
                 : (LOW_BANDWIDTH_DIAGNOSTIC_MODE ? "首次强低带宽打开" : "首次兼容参数打开");
             slot.previewFpsMin = previewSettings.fpsMin;
             slot.previewFpsMax = previewSettings.fpsMax;
@@ -750,17 +752,17 @@ public final class MainActivity extends Activity {
     private PreviewChoice choosePreviewSize(final String supportedSizeJson) {
         final List<Size> mjpegSizes = UVCCamera.getSupportedSize(6, supportedSizeJson);
         final List<Size> yuyvSizes = UVCCamera.getSupportedSize(4, supportedSizeJson);
-        return choosePreviewSize(mjpegSizes, yuyvSizes, 0);
+        return choosePreviewSize(mjpegSizes, yuyvSizes, 0, 0);
     }
 
     private PreviewChoice choosePreviewSize(final List<Size> mjpegSizes, final List<Size> yuyvSizes,
-        final int retryCount) {
+        final int retryCount, final int slotIndex) {
         final List<PreviewChoice> candidates = new ArrayList<PreviewChoice>();
         addPreviewCandidates(candidates, mjpegSizes, UVCCamera.FRAME_FORMAT_MJPEG);
         addPreviewCandidates(candidates, yuyvSizes, UVCCamera.FRAME_FORMAT_YUYV);
 
         final PreviewChoice preview = choosePreviewCandidateForRetry(candidates, mjpegSizes,
-            yuyvSizes, retryCount);
+            yuyvSizes, retryCount, slotIndex);
         if (preview != null) {
             return preview;
         }
@@ -773,9 +775,16 @@ public final class MainActivity extends Activity {
     }
 
     private PreviewChoice choosePreviewCandidateForRetry(final List<PreviewChoice> candidates,
-        final List<Size> mjpegSizes, final List<Size> yuyvSizes, final int retryCount) {
+        final List<Size> mjpegSizes, final List<Size> yuyvSizes, final int retryCount,
+        final int slotIndex) {
         if (LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
             return chooseLowBandwidthPreviewCandidate(candidates);
+        }
+        if (slotIndex == 0 && retryCount >= 3) {
+            final PreviewChoice probe = chooseFirstSlotFullProbeCandidate(candidates, retryCount);
+            if (probe != null) {
+                return probe;
+            }
         }
         if (retryCount == 1) {
             final PreviewChoice alternateMjpeg = chooseAlternateMjpegPreviewCandidate(mjpegSizes);
@@ -791,6 +800,58 @@ public final class MainActivity extends Activity {
             return alternateMjpeg != null ? alternateMjpeg : choosePreviewCandidate(candidates, false);
         }
         return choosePreviewCandidate(candidates, false);
+    }
+
+    private PreviewChoice chooseFirstSlotFullProbeCandidate(final List<PreviewChoice> candidates,
+        final int retryCount) {
+        final List<PreviewChoice> probeCandidates = buildFullProbeCandidates(candidates);
+        if (probeCandidates.isEmpty()) return null;
+        final int candidateIndex = retryCount - 3;
+        if (candidateIndex >= probeCandidates.size()) {
+            return probeCandidates.get(probeCandidates.size() - 1);
+        }
+        return probeCandidates.get(candidateIndex);
+    }
+
+    private List<PreviewChoice> buildFullProbeCandidates(final List<PreviewChoice> candidates) {
+        final List<PreviewChoice> result = new ArrayList<PreviewChoice>();
+        if (candidates == null) return result;
+        for (final PreviewChoice candidate : candidates) {
+            if (containsPreviewCandidate(result, candidate)) continue;
+            final PreviewChoice copy = new PreviewChoice(candidate.width, candidate.height,
+                candidate.format);
+            int insertIndex = result.size();
+            for (int i = 0; i < result.size(); i++) {
+                if (compareFullProbeCandidate(copy, result.get(i)) < 0) {
+                    insertIndex = i;
+                    break;
+                }
+            }
+            result.add(insertIndex, copy);
+        }
+        return result;
+    }
+
+    private boolean containsPreviewCandidate(final List<PreviewChoice> candidates,
+        final PreviewChoice target) {
+        if (target == null) return true;
+        for (final PreviewChoice candidate : candidates) {
+            if (candidate.width == target.width && candidate.height == target.height
+                && candidate.format == target.format) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int compareFullProbeCandidate(final PreviewChoice left, final PreviewChoice right) {
+        final int leftArea = area(left);
+        final int rightArea = area(right);
+        if (leftArea != rightArea) return leftArea - rightArea;
+        if (left.width != right.width) return left.width - right.width;
+        if (left.height != right.height) return left.height - right.height;
+        if (left.format == right.format) return 0;
+        return left.format == UVCCamera.FRAME_FORMAT_MJPEG ? -1 : 1;
     }
 
     private PreviewChoice chooseAlternateMjpegPreviewCandidate(final List<Size> mjpegSizes) {
@@ -844,7 +905,14 @@ public final class MainActivity extends Activity {
     }
 
     private String retryStrategyName(final int retryCount) {
+        return retryStrategyName(retryCount, -1);
+    }
+
+    private String retryStrategyName(final int retryCount, final int slotIndex) {
         if (!LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
+            if (slotIndex == 0 && retryCount >= 3) {
+                return "第1路全档位探测，轮换MJPEG/YUYV所有分辨率";
+            }
             if (retryCount >= 2) {
                 return "MJPEG仍无帧，改试YUYV兼容格式";
             }
@@ -939,12 +1007,16 @@ public final class MainActivity extends Activity {
         return candidate.format == preferredFormat && current.format != preferredFormat;
     }
 
-    private String previewSelectionReason(final PreviewChoice preview, final int retryCount) {
+    private String previewSelectionReason(final PreviewChoice preview, final int retryCount,
+        final int slotIndex) {
         if (LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
             if (isLowBandwidthPreview(preview)) {
                 return "强低带宽诊断，优先压低USB压力";
             }
             return "未找到320x240及以下，使用兼容带宽系数";
+        }
+        if (slotIndex == 0 && retryCount >= 3) {
+            return "第1路全档位探测，轮换MJPEG/YUYV所有分辨率";
         }
         if (retryCount == 1) {
             return "MJPEG无帧，改试其它MJPEG分辨率";
@@ -1547,7 +1619,7 @@ public final class MainActivity extends Activity {
                     + "，frames=" + frames
                     + "，fps=" + String.format(Locale.US, "%.1f", fps)
                     + "，camera=" + (camera != null ? "存在" : "无")
-                    + "，retry=" + noFrameRetryCount + "/" + MAX_NO_FRAME_RETRIES);
+                    + "，retry=" + noFrameRetryCount + "/" + maxNoFrameRetries());
             }
             if (!"OPEN".equals(status)) {
                 if (verbose) addLog("自动重试监控：第" + (index + 1) + "路未重试，当前不是已打开状态");
@@ -1580,7 +1652,7 @@ public final class MainActivity extends Activity {
                 if (verbose) addLog("自动重试监控：第" + (index + 1) + "路未到检查时间");
                 return;
             }
-            if (noFrameRetryCount >= MAX_NO_FRAME_RETRIES) {
+            if (noFrameRetryCount >= maxNoFrameRetries()) {
                 if (!retryLimitLogged) {
                     retryLimitLogged = true;
                     addLog("自动重试：第" + (index + 1) + "路仍无帧，已达到最大重试次数，请检查USB带宽/供电/摄像头口");
@@ -1597,7 +1669,7 @@ public final class MainActivity extends Activity {
             noFrameRetryCount++;
             retryDeviceName = retryDevice.getDeviceName();
             addLog("自动重试：第" + (index + 1) + "路打开后无帧，准备第" + noFrameRetryCount
-                + "次重开，策略=" + retryStrategyName(noFrameRetryCount));
+                + "次重开，策略=" + retryStrategyName(noFrameRetryCount, index));
             closeCamera(false);
             mUiHandler.postDelayed(new Runnable() {
                 @Override
@@ -1643,7 +1715,7 @@ public final class MainActivity extends Activity {
                 .append(" fps=").append(String.format(Locale.US, "%.1f", fps));
             if (noFrameRetryCount > 0 || retryPending) {
                 sb.append("\n自动重试=").append(noFrameRetryCount)
-                    .append("/").append(MAX_NO_FRAME_RETRIES);
+                    .append("/").append(maxNoFrameRetries());
                 if (retryPending) {
                     sb.append(" 等待重开");
                 }
@@ -1655,6 +1727,10 @@ public final class MainActivity extends Activity {
                 sb.append(mStreamHub.getSlotLabelExtra(index));
             }
             label.setText(sb.toString());
+        }
+
+        int maxNoFrameRetries() {
+            return index == 0 ? MAX_FIRST_SLOT_FULL_PROBE_RETRIES : MAX_NO_FRAME_RETRIES;
         }
 
         private String displayStatus(final String rawStatus) {

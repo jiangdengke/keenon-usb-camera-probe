@@ -400,3 +400,21 @@
 - `docs/eight-camera-probe.md`: documented stable manual log scrolling in the probe guide.
 - `progress.md`: appended this implementation record.
 - Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.
+
+## 2026-06-26 - Task: Add first-route full probe retries
+
+### What was done
+- Added first-route-only full probing after the existing MJPEG alternate-size and YUYV fallback retries still produce no frames.
+- Kept other camera slots limited to the existing two no-frame retries, while allowing the first slot to retry up to 10 times for diagnosis.
+- Rotated the first slot through the device-declared MJPEG/YUYV preview sizes from smaller to larger so field testing can confirm whether any advertised format/resolution produces frames or JPEG output.
+- Updated field documentation so onsite users know to watch for `第1路全档位探测`, `帧回调首次到达`, `JPEG已生成`, and `Surface抓图JPEG已生成`.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: added first-slot full-probe candidate selection and first-slot-specific retry limit while preserving existing behavior for other slots.
+- `README.md`: documented the first-route full-probe log meaning and stream/snapshot verification trigger.
+- `docs/eight-camera-probe.md`: documented the first-route full-probe behavior in the probe guide.
+- `progress.md`: appended this implementation record.
+- Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.

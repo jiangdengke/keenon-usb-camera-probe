@@ -186,6 +186,7 @@ Workflow 会执行：
 - 日志里出现“兼容恢复模式已启用”：说明 App 正在使用 UVCCamera 默认 FPS 和 1.00 带宽系数，不再使用强低 FPS 或强低带宽诊断参数。
 - 日志里出现“MJPEG无帧，改试其它MJPEG分辨率”：说明当前路 640x480 MJPEG 不出帧，App 正在尝试同一摄像头的其它 MJPEG 档位。
 - 日志里出现“MJPEG仍无帧，改试YUYV兼容格式”：说明 MJPEG 候选仍没有帧，App 正在尝试 YUYV 格式。
+- 日志里出现“第1路全档位探测”：说明第 1 路前几档仍无帧，App 正在把该设备声明支持的 MJPEG/YUYV 分辨率按从小到大自动轮换，最多重试 10 次；只要任一档位出现 `帧回调首次到达`、`JPEG已生成` 或 `Surface抓图JPEG已生成`，就立即测试 `/stream/0.mjpeg` 和 `/snapshot/0.jpg`。
 - 日志里出现“真实预览窗口引出帧回调”、“格式=RAW”、“YUYV RAW将转JPEG”或“来源=YUYV->NV21”：说明这一路 YUYV 正在用真实 Surface 驱动底层出帧，同时由覆盖层遮挡原生绿屏，并由 Java 尝试把 RAW YUYV 转成 JPEG 给格子显示、拉流和截图使用。
 - 日志里出现“自动重试”：说明某一路打开后持续无帧，App 已主动重开；如果其它 MJPEG 和 YUYV 都无帧，优先怀疑该路第三方 UVC 访问受限或驱动兼容问题；如果 YUYV 有帧且 JPEG 帧增长，说明 MJPEG 通道不兼容但 YUYV 兜底已可用于 HTTP 拉流。
 - `/cameras` 会返回每路 `openSequence`、`fpsMin`、`fpsMax`、`fpsFallback`、`bandwidthFactor`、`lowBandwidthMode`、`selectionReason`、`lastFrameAgeMs`、`lastFrameBytes` 和 `diagnosis`，可以远程判断失败是否总是发生在最后打开的一路、是否已进入强低带宽策略、是否底层根本没有帧回调。
