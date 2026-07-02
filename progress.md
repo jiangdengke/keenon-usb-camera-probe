@@ -418,3 +418,50 @@
 - `docs/eight-camera-probe.md`: documented the first-route full-probe behavior in the probe guide.
 - `progress.md`: appended this implementation record.
 - Rollback: revert this task's changes in the four files above, or restore the previous commit/state before this task.
+
+## 2026-07-02 - Task: Add Camera2 official-compatible stable preview release
+
+### What was done
+- Switched the default camera opening path to the official-compatible Android Camera2/HAL `cameraIdList` flow so the probe can use the same route that works in Keenon's `CurrencyCameraActivity`.
+- Kept the existing HTTP MJPEG and snapshot endpoints by capturing JPEG from each Camera2 `TextureView`.
+- Reduced field flicker risk by increasing the TextureView JPEG capture interval to 800 ms and applying a supported Camera2 fps range closest to 10-15 fps when available.
+- Documented the Camera2 verification logs and the remaining USB/libuvc fallback path.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Read linter diagnostics for `MainActivity.java`; no diagnostics were reported.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: added the Camera2/HAL default path, Camera permission handling, TextureView-based stream generation, and Camera2 fps range selection.
+- `app/src/main/AndroidManifest.xml`: added Camera permission and an optional camera feature declaration for the Camera2 path.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java`: extended stream reporting for Surface/TextureView JPEG sources used by the Camera2 path.
+- `app/src/main/java/com/serenegiant/usb/UVCCamera.java`: kept the RAW callback support needed by the old USB/libuvc fallback path.
+- `libuvccamera/src/main/jni/UVCCamera/UVCPreview.cpp` and `libuvccamera/src/main/jni/UVCCamera/UVCPreview.h`: kept native fallback support aligned with the raw frame path.
+- `libuvccamera/src/main/libs/` and `libuvccamera/src/main/obj/`: rebuilt tracked native outputs after the native fallback change.
+- `README.md`: documented the default Camera2 mode, 800 ms capture interval, fpsRange logs, and onsite checks.
+- `docs/eight-camera-probe.md`: documented Camera2/HAL runtime behavior and field verification signals.
+- `progress.md`: appended this implementation record.
+- Rollback: revert commit `v0.1.0-beta.24` to return to the previous beta23 USB/libuvc-first behavior, or launch with Camera2 disabled via ADB extra to use the older path.
+## 2026-07-02 - Task: Add Camera2 official-compatible stable preview release
+
+### What was done
+- Switched the default camera opening path to the official-compatible Android Camera2/HAL `cameraIdList` flow so the probe can use the same route that works in Keenon's `CurrencyCameraActivity`.
+- Kept the existing HTTP MJPEG and snapshot endpoints by capturing JPEG from each Camera2 `TextureView`.
+- Reduced field flicker risk by increasing the TextureView JPEG capture interval to 800 ms and applying a supported Camera2 fps range closest to 10-15 fps when available.
+- Documented the Camera2 verification logs and the remaining USB/libuvc fallback path.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Read linter diagnostics for `MainActivity.java`; no diagnostics were reported.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: added the Camera2/HAL default path, Camera permission handling, TextureView-based stream generation, and Camera2 fps range selection.
+- `app/src/main/AndroidManifest.xml`: added Camera permission and an optional camera feature declaration for the Camera2 path.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java`: extended stream reporting for Surface/TextureView JPEG sources used by the Camera2 path.
+- `app/src/main/java/com/serenegiant/usb/UVCCamera.java`: kept the RAW callback support needed by the old USB/libuvc fallback path.
+- `libuvccamera/src/main/jni/UVCCamera/UVCPreview.cpp` and `libuvccamera/src/main/jni/UVCCamera/UVCPreview.h`: kept native fallback support aligned with the raw frame path.
+- `libuvccamera/src/main/libs/` and `libuvccamera/src/main/obj/`: rebuilt tracked native outputs after the native fallback change.
+- `README.md`: documented the default Camera2 mode, 800 ms capture interval, fpsRange logs, and onsite checks.
+- `docs/eight-camera-probe.md`: documented Camera2/HAL runtime behavior and field verification signals.
+- `progress.md`: appended this implementation record.
+- Rollback: revert commit `v0.1.0-beta.24` to return to the previous beta23 USB/libuvc-first behavior, or launch with Camera2 disabled via ADB extra to use the older path.

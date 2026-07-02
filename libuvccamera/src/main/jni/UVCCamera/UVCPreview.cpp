@@ -282,6 +282,10 @@ void UVCPreview::callbackPixelFormatChanged() {
 		mFrameCallbackFunc = uvc_yuyv2yuv420SP;
 		callbackPixelBytes = (sz * 3) / 2;
 		break;
+	  case PIXEL_FORMAT_MJPEG:
+		LOGI("PIXEL_FORMAT_MJPEG:");
+		callbackPixelBytes = 0;
+		break;
 	}
 }
 
@@ -524,14 +528,19 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 #if LOCAL_DEBUG
 		LOGI("Streaming...");
 #endif
-		if (frameMode) {
-			// MJPEG mode
-			for ( ; LIKELY(isRunning()) ; ) {
-				frame_mjpeg = waitPreviewFrame();
-				if (LIKELY(frame_mjpeg)) {
-					frame = get_frame(frame_mjpeg->width * frame_mjpeg->height * 2);
-					result = uvc_mjpeg2yuyv(frame_mjpeg, frame);   // MJPEG => yuyv
-					recycle_frame(frame_mjpeg);
+			if (frameMode) {
+				// MJPEG mode
+				for ( ; LIKELY(isRunning()) ; ) {
+					frame_mjpeg = waitPreviewFrame();
+					if (LIKELY(frame_mjpeg)) {
+						if (mPixelFormat == PIXEL_FORMAT_MJPEG) {
+							addCaptureFrame(frame_mjpeg);
+							frame_mjpeg = NULL;
+							continue;
+						}
+						frame = get_frame(frame_mjpeg->width * frame_mjpeg->height * 2);
+						result = uvc_mjpeg2yuyv(frame_mjpeg, frame);   // MJPEG => yuyv
+						recycle_frame(frame_mjpeg);
 					if (LIKELY(!result)) {
 						frame = draw_preview_one(frame, &mPreviewWindow, uvc_any2rgbx, 4);
 						addCaptureFrame(frame);
@@ -848,6 +857,7 @@ void UVCPreview::do_capture_callback(JNIEnv *env, uvc_frame_t *frame) {
 
 	if (LIKELY(frame)) {
 		uvc_frame_t *callback_frame = frame;
+		size_t direct_buffer_bytes = callbackPixelBytes;
 		if (mFrameCallbackObj) {
 			if (mFrameCallbackFunc) {
 				callback_frame = get_frame(callbackPixelBytes);
@@ -863,14 +873,23 @@ void UVCPreview::do_capture_callback(JNIEnv *env, uvc_frame_t *frame) {
 					callback_frame = frame;
 					goto SKIP;
 				}
+			} else if ((mPixelFormat == PIXEL_FORMAT_MJPEG)
+				|| (mPixelFormat == PIXEL_FORMAT_RAW)) {
+				if (callback_frame->actual_bytes > 0) {
+					direct_buffer_bytes = callback_frame->actual_bytes;
+				} else if (callback_frame->data_bytes > 0) {
+					direct_buffer_bytes = callback_frame->data_bytes;
+				}
 			}
-			jobject buf = env->NewDirectByteBuffer(callback_frame->data, callbackPixelBytes);
-			env->CallVoidMethod(mFrameCallbackObj, iframecallback_fields.onFrame, buf);
-			env->ExceptionClear();
-			env->DeleteLocalRef(buf);
+			if (direct_buffer_bytes > 0) {
+				jobject buf = env->NewDirectByteBuffer(callback_frame->data, direct_buffer_bytes);
+				env->CallVoidMethod(mFrameCallbackObj, iframecallback_fields.onFrame, buf);
+				env->ExceptionClear();
+				env->DeleteLocalRef(buf);
+			}
+	 SKIP:
+			recycle_frame(callback_frame);
 		}
- SKIP:
-		recycle_frame(callback_frame);
 	}
 	EXIT();
 }

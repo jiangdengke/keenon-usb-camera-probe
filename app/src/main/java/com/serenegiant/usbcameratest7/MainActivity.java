@@ -23,15 +23,24 @@
 
 package com.serenegiant.usbcameratest7;
 
+import android.Manifest;
 import android.app.Activity;
+import android.content.pm.PackageManager;
 import android.content.pm.PackageInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.SurfaceTexture;
 import android.graphics.Typeface;
+import android.hardware.camera2.CameraAccessException;
+import android.hardware.camera2.CameraCaptureSession;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraDevice;
+import android.hardware.camera2.CameraManager;
+import android.hardware.camera2.CaptureRequest;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbInterface;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -40,6 +49,7 @@ import android.text.Spanned;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.StyleSpan;
 import android.util.Log;
+import android.util.Range;
 import android.view.Gravity;
 import android.view.Surface;
 import android.view.TextureView;
@@ -61,6 +71,7 @@ import com.serenegiant.usb.UVCCamera;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -102,11 +113,18 @@ public final class MainActivity extends Activity {
     private static final long NO_FRAME_RETRY_DELAY_MS = 1200;
     private static final long OPEN_STAGGER_DELAY_MS = 900;
     private static final long JPEG_OVERLAY_UPDATE_INTERVAL_MS = 600;
-    private static final long SURFACE_CAPTURE_INTERVAL_MS = 500;
+    private static final long SURFACE_CAPTURE_INTERVAL_MS = 800;
     private static final long SURFACE_CAPTURE_LOG_INTERVAL_MS = 5000;
     private static final int SURFACE_CAPTURE_JPEG_QUALITY = 60;
     private static final int MAX_NO_FRAME_RETRIES = 2;
     private static final int MAX_FIRST_SLOT_FULL_PROBE_RETRIES = 10;
+    private static final int FIRST_SLOT_PROMOTE_AFTER_RETRIES = 3;
+    private static final boolean DISABLE_FIRST_SLOT_YUYV_BY_DEFAULT = false;
+    private static final boolean PROMOTE_HEALTHY_FIRST_SLOT_BY_DEFAULT = true;
+    private static final boolean USE_CAMERA2_BY_DEFAULT = true;
+    private static final int CAMERA_PERMISSION_REQUEST = 4102;
+    private static final int CAMERA2_TARGET_MIN_FPS = 10;
+    private static final int CAMERA2_TARGET_MAX_FPS = 15;
     private static final int PRIMARY_SLOT_LOG_COLOR = Color.rgb(255, 230, 0);
     private static final float BANDWIDTH_FACTOR = 0.20f;
     private static final float RETRY_BANDWIDTH_FACTOR = 0.10f;
@@ -115,10 +133,12 @@ public final class MainActivity extends Activity {
     private final Handler mUiHandler = new Handler(Looper.getMainLooper());
     private final List<UsbDevice> mPermissionQueue = new ArrayList<UsbDevice>();
     private final Set<String> mQueuedDeviceNames = new HashSet<String>();
+    private final Set<String> mFirstSlotSkippedDeviceNames = new HashSet<String>();
     private final Map<String, CameraSlot> mOpenedByDeviceName = new HashMap<String, CameraSlot>();
 
     private USBMonitor mUSBMonitor;
     private CameraStreamHub mStreamHub;
+    private CameraManager mCamera2Manager;
     private CameraSlot[] mSlots;
     private TextView mStatusText;
     private TextView mServerText;
@@ -135,10 +155,17 @@ public final class MainActivity extends Activity {
     private long mLastPermissionRequestMs;
     private int mLastUsbCount;
     private int mLastUvcCount;
+    private int mLastCamera2Count;
     private int mVisibleSlotCount;
     private long mLastHealthLogMs;
     private int mOpenSequence;
     private boolean mFirstSlotOnlyMode;
+    private boolean mDisableFirstSlotYuyv;
+    private boolean mPromoteHealthyFirstSlot;
+    private boolean mFirstSlotPromotionScheduled;
+    private boolean mUseCamera2;
+    private int mFirstSlotSkipCount;
+    private String mFirstSlotDeviceFilter;
 
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
@@ -151,8 +178,58 @@ public final class MainActivity extends Activity {
                 addLog(message);
             }
         });
+        mUseCamera2 = getIntent() == null
+            || getIntent().getBooleanExtra("use_camera2",
+                getIntent().getBooleanExtra("camera2_mode", USE_CAMERA2_BY_DEFAULT));
+        mFirstSlotOnlyMode = getIntent() != null
+            && getIntent().getBooleanExtra("first_slot_only", false);
+        mDisableFirstSlotYuyv = getIntent() != null
+            ? getIntent().getBooleanExtra("disable_first_slot_yuyv",
+                DISABLE_FIRST_SLOT_YUYV_BY_DEFAULT)
+            : DISABLE_FIRST_SLOT_YUYV_BY_DEFAULT;
+        mPromoteHealthyFirstSlot = getIntent() == null
+            || getIntent().getBooleanExtra("promote_healthy_first_slot",
+                getIntent().getBooleanExtra("first_slot_promote_healthy",
+                    PROMOTE_HEALTHY_FIRST_SLOT_BY_DEFAULT));
+        mFirstSlotSkipCount = Math.max(0, getIntent() != null
+            ? getIntent().getIntExtra("first_slot_skip_count", 0) : 0);
+        if (getIntent() != null) {
+            mFirstSlotDeviceFilter = trimToNull(getIntent().getStringExtra("first_slot_device"));
+            if (mFirstSlotDeviceFilter == null) {
+                mFirstSlotDeviceFilter = trimToNull(getIntent().getStringExtra("first_slot_device_name"));
+            }
+        } else {
+            mFirstSlotDeviceFilter = null;
+        }
         addLog("应用已启动，版本=" + appVersionText() + "，HTTP端口=" + STREAM_PORT);
-        if (LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
+        if (mUseCamera2) {
+            addLog("官方兼容模式已启用：优先使用Android Camera2/HAL cameraIdList打开摄像头，贴近官方CurrencyCameraActivity");
+        } else {
+            addLog("UVC直连模式已启用：使用USB/libuvc枚举 /dev/bus/usb 设备");
+        }
+        if (mFirstSlotOnlyMode) {
+            addLog("ADB调试：第1路独占模式已启用，本次只打开第1个"
+                + (mUseCamera2 ? "Camera2 ID" : "UVC设备"));
+        }
+        if (!mUseCamera2 && mPromoteHealthyFirstSlot) {
+            addLog("ADB调试：第1路健康提升已启用，当前第1路多档位无画面后会临时跳过该USB设备，改开下一颗UVC到/stream/0.mjpeg");
+        }
+        if (mFirstSlotSkipCount > 0) {
+            addLog("ADB调试：第1路会先跳过前" + mFirstSlotSkipCount + "个UVC候选");
+        }
+        if (mFirstSlotDeviceFilter != null) {
+            addLog("ADB调试：第1路只匹配USB设备：" + mFirstSlotDeviceFilter);
+        }
+        if (mUseCamera2) {
+            addLog("Camera2模式：预览尺寸按官方代码固定为 "
+                + TARGET_WIDTH + "x" + TARGET_HEIGHT
+                + "，通过TextureView抓图生成 /stream/N.mjpeg");
+        } else if (mDisableFirstSlotYuyv) {
+            addLog("ADB调试：第1路YUYV兜底已关闭，本次第1路只探测MJPEG");
+        } else {
+            addLog("ADB调试：第1路YUYV兜底与MJPEG原始帧直通已启用，MJPEG无帧后会自动兜底拉流");
+        }
+        if (!mUseCamera2 && LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
             addLog("强低带宽诊断模式已启用：MJPEG优先，目标<="
                 + LOW_BANDWIDTH_TARGET_WIDTH + "x" + LOW_BANDWIDTH_TARGET_HEIGHT
                 + "，fps=" + PREVIEW_MIN_FPS + "-" + PREVIEW_MAX_FPS
@@ -160,7 +237,7 @@ public final class MainActivity extends Activity {
                 + "，低分辨率带宽系数=" + BANDWIDTH_FACTOR + "/" + RETRY_BANDWIDTH_FACTOR
                 + "，高分辨率回退=" + COMPAT_BANDWIDTH_FACTOR
                 + "，错峰=" + OPEN_STAGGER_DELAY_MS + "ms");
-        } else {
+        } else if (!mUseCamera2) {
             addLog("兼容恢复模式已启用：MJPEG优先，目标<="
                 + TARGET_WIDTH + "x" + TARGET_HEIGHT
                 + "，fps=UVCCamera默认" + UVCCamera.DEFAULT_PREVIEW_MIN_FPS
@@ -173,12 +250,14 @@ public final class MainActivity extends Activity {
     @Override
     protected void onStart() {
         super.onStart();
-        mUSBMonitor.register();
+        if (!mUseCamera2 && mUSBMonitor != null) {
+            mUSBMonitor.register();
+        }
         if (mStreamHub != null) {
             mStreamHub.start();
         }
         updateServerInfo();
-        addLog("USB监听已启动");
+        addLog(mUseCamera2 ? "Camera2扫描已启动" : "USB监听已启动");
         mUiHandler.postDelayed(mScanRunnable, 800);
         mUiHandler.postDelayed(mFpsRunnable, 1000);
     }
@@ -193,7 +272,9 @@ public final class MainActivity extends Activity {
         if (mStreamHub != null) {
             mStreamHub.stop();
         }
-        mUSBMonitor.unregister();
+        if (!mUseCamera2 && mUSBMonitor != null) {
+            mUSBMonitor.unregister();
+        }
         super.onStop();
     }
 
@@ -207,6 +288,7 @@ public final class MainActivity extends Activity {
             mUSBMonitor.destroy();
             mUSBMonitor = null;
         }
+        mCamera2Manager = null;
         super.onDestroy();
     }
 
@@ -217,6 +299,12 @@ public final class MainActivity extends Activity {
         } catch (final Exception e) {
             return "未知";
         }
+    }
+
+    private String trimToNull(final String value) {
+        if (value == null) return null;
+        final String trimmed = value.trim();
+        return trimmed.length() > 0 ? trimmed : null;
     }
 
     private View createContentView() {
@@ -236,7 +324,7 @@ public final class MainActivity extends Activity {
             @Override
             public void onClick(final View v) {
                 mFirstSlotOnlyMode = false;
-                scanAndRequestUvcDevices();
+                scanAndOpenActiveCameraMode();
             }
         });
         topBar.addView(scanButton, new LinearLayout.LayoutParams(
@@ -360,9 +448,10 @@ public final class MainActivity extends Activity {
 
     private void openFirstSlotOnly() {
         mFirstSlotOnlyMode = true;
-        addLog("第1路独占模式：将关闭其它路，只打开扫描到的第1个UVC设备验证/stream/0.mjpeg");
+        addLog("第1路独占模式：将关闭其它路，只打开扫描到的第1个"
+            + (mUseCamera2 ? "Camera2 ID" : "UVC设备") + "验证/stream/0.mjpeg");
         closeAllCameras();
-        scanAndRequestUvcDevices();
+        scanAndOpenActiveCameraMode();
     }
 
     private void updateVisibleSlots(final int requestedSlotCount) {
@@ -410,7 +499,7 @@ public final class MainActivity extends Activity {
     private final Runnable mScanRunnable = new Runnable() {
         @Override
         public void run() {
-            scanAndRequestUvcDevices();
+            scanAndOpenActiveCameraMode();
         }
     };
 
@@ -433,6 +522,185 @@ public final class MainActivity extends Activity {
         }
     };
 
+    private void scanAndOpenActiveCameraMode() {
+        if (mUseCamera2) {
+            scanAndOpenCamera2Devices();
+        } else {
+            scanAndRequestUvcDevices();
+        }
+    }
+
+    private boolean ensureCamera2Permission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            return true;
+        }
+        addLog("Camera2模式：等待系统摄像头权限授权");
+        requestPermissions(new String[] { Manifest.permission.CAMERA }, CAMERA_PERMISSION_REQUEST);
+        return false;
+    }
+
+    @Override
+    public void onRequestPermissionsResult(final int requestCode, final String[] permissions,
+        final int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == CAMERA_PERMISSION_REQUEST) {
+            final boolean granted = grantResults != null && grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            addLog("Camera2模式：摄像头权限" + (granted ? "已授权" : "被拒绝"));
+            if (granted) {
+                scanAndOpenCamera2Devices();
+            } else {
+                updateStatus("Camera2摄像头权限被拒绝");
+            }
+        }
+    }
+
+    private void scanAndOpenCamera2Devices() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+            addLog("Camera2模式不可用：系统版本低于Android 5.0，回退到UVC模式");
+            mUseCamera2 = false;
+            if (mUSBMonitor != null) {
+                mUSBMonitor.register();
+            }
+            scanAndRequestUvcDevices();
+            return;
+        }
+        if (!ensureCamera2Permission()) return;
+
+        try {
+            if (mCamera2Manager == null) {
+                mCamera2Manager = (CameraManager)getSystemService(CAMERA_SERVICE);
+            }
+            final String[] cameraIds = mCamera2Manager != null
+                ? mCamera2Manager.getCameraIdList() : new String[0];
+            mLastCamera2Count = cameraIds.length;
+            mLastUsbCount = 0;
+            mLastUvcCount = 0;
+            final int slotLimit = mFirstSlotOnlyMode ? 1 : MAX_CAMERAS;
+            final int slotCount = Math.min(cameraIds.length, slotLimit);
+            updateVisibleSlots(slotCount);
+            addLog("Camera2扫描结果：cameraId数量=" + cameraIds.length
+                + "，本轮打开=" + slotCount);
+            for (int i = 0; i < cameraIds.length; i++) {
+                addLog("发现Camera2摄像头：id=" + cameraIds[i]
+                    + describeCamera2Id(cameraIds[i]));
+            }
+            for (int i = 0; i < slotCount; i++) {
+                final CameraSlot slot = mSlots[i];
+                slot.assignCamera2(cameraIds[i], ++mOpenSequence);
+            }
+            updateStatus("Camera2扫描完成");
+        } catch (final Exception e) {
+            Log.e(TAG, "Camera2 scan/open failed", e);
+            addLog("Camera2扫描/打开失败：" + e.getMessage());
+            updateStatus("Camera2扫描失败");
+        }
+    }
+
+    private Range<Integer> chooseCamera2FpsRange(final String cameraId) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP
+            || mCamera2Manager == null || cameraId == null) {
+            return null;
+        }
+        try {
+            final CameraCharacteristics characteristics =
+                mCamera2Manager.getCameraCharacteristics(cameraId);
+            final Range<Integer>[] ranges = characteristics.get(
+                CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+            if (ranges == null || ranges.length == 0) {
+                addLog("Camera2：cameraId=" + cameraId
+                    + " 未上报可用fpsRange，使用系统默认");
+                return null;
+            }
+
+            Range<Integer> best = null;
+            int bestScore = Integer.MAX_VALUE;
+            final StringBuilder available = new StringBuilder();
+            for (final Range<Integer> range : ranges) {
+                if (range == null) continue;
+                if (available.length() > 0) available.append(',');
+                available.append(formatCamera2FpsRange(range));
+
+                final int lower = range.getLower();
+                final int upper = range.getUpper();
+                int score = Math.abs(upper - CAMERA2_TARGET_MAX_FPS) * 20
+                    + Math.abs(lower - CAMERA2_TARGET_MIN_FPS) * 5;
+                if (upper >= CAMERA2_TARGET_MIN_FPS && upper <= CAMERA2_TARGET_MAX_FPS) {
+                    score -= 1000;
+                }
+                if (upper > CAMERA2_TARGET_MAX_FPS) {
+                    score += (upper - CAMERA2_TARGET_MAX_FPS) * 30;
+                }
+                if (lower > CAMERA2_TARGET_MAX_FPS) {
+                    score += 300;
+                }
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = range;
+                }
+            }
+            addLog("Camera2：cameraId=" + cameraId + " 可用fpsRange=" + available
+                + "，选用=" + formatCamera2FpsRange(best));
+            return best;
+        } catch (final Exception e) {
+            addLog("Camera2：cameraId=" + cameraId + " 读取fpsRange失败："
+                + e.getMessage() + "，使用系统默认");
+            return null;
+        }
+    }
+
+    private String formatCamera2FpsRange(final Range<Integer> range) {
+        return range == null ? "系统默认" : range.getLower() + "-" + range.getUpper();
+    }
+
+    private String describeCamera2Id(final String cameraId) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP
+            || mCamera2Manager == null || cameraId == null) {
+            return "";
+        }
+        try {
+            final CameraCharacteristics characteristics =
+                mCamera2Manager.getCameraCharacteristics(cameraId);
+            final Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
+            final Integer level = characteristics.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL);
+            return " facing=" + camera2FacingName(facing)
+                + " level=" + camera2LevelName(level);
+        } catch (final Exception e) {
+            return " characteristics读取失败=" + e.getMessage();
+        }
+    }
+
+    private String camera2FacingName(final Integer facing) {
+        if (facing == null) return "unknown";
+        switch (facing) {
+            case CameraCharacteristics.LENS_FACING_FRONT:
+                return "front";
+            case CameraCharacteristics.LENS_FACING_BACK:
+                return "back";
+            case CameraCharacteristics.LENS_FACING_EXTERNAL:
+                return "external";
+            default:
+                return String.valueOf(facing);
+        }
+    }
+
+    private String camera2LevelName(final Integer level) {
+        if (level == null) return "unknown";
+        switch (level) {
+            case CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY:
+                return "legacy";
+            case CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LIMITED:
+                return "limited";
+            case CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_FULL:
+                return "full";
+            case CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_3:
+                return "level3";
+            default:
+                return String.valueOf(level);
+        }
+    }
+
     private void scanAndRequestUvcDevices() {
         if (mUSBMonitor == null) return;
 
@@ -444,13 +712,17 @@ public final class MainActivity extends Activity {
             }
         }
 
+        final List<UsbDevice> openCandidates = buildOpenCandidates(uvcDevices);
         mLastUsbCount = allDevices.size();
         mLastUvcCount = uvcDevices.size();
         final int slotLimit = mFirstSlotOnlyMode ? 1 : MAX_CAMERAS;
-        updateVisibleSlots(Math.min(mLastUvcCount, slotLimit));
+        updateVisibleSlots(Math.min(openCandidates.size(), slotLimit));
 
-        Log.i(TAG, "USB devices=" + allDevices.size() + ", UVC candidates=" + uvcDevices.size());
-        addLog("扫描结果：USB设备=" + allDevices.size() + "，UVC摄像头=" + uvcDevices.size());
+        Log.i(TAG, "USB devices=" + allDevices.size() + ", UVC candidates=" + uvcDevices.size()
+            + ", open candidates=" + openCandidates.size());
+        addLog("扫描结果：USB设备=" + allDevices.size() + "，UVC摄像头=" + uvcDevices.size()
+            + (openCandidates.size() != uvcDevices.size()
+                ? "，本轮可打开=" + openCandidates.size() : ""));
         if (mFirstSlotOnlyMode) {
             addLog("第1路独占模式已启用：本次只会请求第1个UVC设备授权，其它UVC不打开");
         }
@@ -461,7 +733,7 @@ public final class MainActivity extends Activity {
 
         int queuedOrOpened = mOpenedByDeviceName.size() + mPermissionQueue.size() + countRetryPendingSlots()
             + (mPermissionDeviceName != null ? 1 : 0);
-        for (final UsbDevice device : uvcDevices) {
+        for (final UsbDevice device : openCandidates) {
             if (!hasFreeSlot()) break;
             if (queuedOrOpened >= mVisibleSlotCount) break;
             final String deviceName = device.getDeviceName();
@@ -479,6 +751,48 @@ public final class MainActivity extends Activity {
 
         requestNextPermissionIfNeeded();
         updateStatus("扫描完成");
+    }
+
+    private List<UsbDevice> buildOpenCandidates(final List<UsbDevice> uvcDevices) {
+        final List<UsbDevice> candidates = new ArrayList<UsbDevice>();
+        if (uvcDevices == null || uvcDevices.isEmpty()) return candidates;
+
+        int skippedByIndex = 0;
+        for (final UsbDevice device : uvcDevices) {
+            if (mFirstSlotDeviceFilter != null && !matchesFirstSlotDeviceFilter(device)) {
+                continue;
+            }
+            if (mFirstSlotSkipCount > 0 && skippedByIndex < mFirstSlotSkipCount) {
+                skippedByIndex++;
+                addLog("第1路候选过滤：按first_slot_skip_count跳过 "
+                    + shortDeviceName(device));
+                continue;
+            }
+            if (mFirstSlotSkippedDeviceNames.contains(device.getDeviceName())) {
+                addLog("第1路候选过滤：临时跳过已判定无有效画面的设备 "
+                    + shortDeviceName(device));
+                continue;
+            }
+            candidates.add(device);
+        }
+
+        if (mFirstSlotDeviceFilter != null && candidates.isEmpty()) {
+            addLog("第1路候选过滤：未找到匹配设备 " + mFirstSlotDeviceFilter);
+        }
+        if (!mFirstSlotSkippedDeviceNames.isEmpty() && candidates.isEmpty()
+            && mFirstSlotDeviceFilter == null && mFirstSlotSkipCount == 0) {
+            addLog("第1路候选过滤：所有UVC都在临时跳过列表里，本轮不再自动打开，等待重新插拔或重启应用");
+        }
+        return candidates;
+    }
+
+    private boolean matchesFirstSlotDeviceFilter(final UsbDevice device) {
+        if (device == null || mFirstSlotDeviceFilter == null) return true;
+        final String filter = mFirstSlotDeviceFilter;
+        return device.getDeviceName().contains(filter)
+            || shortDeviceName(device).contains(filter)
+            || String.format(Locale.US, "0x%04x:0x%04x",
+                device.getVendorId(), device.getProductId()).contains(filter);
     }
 
     private void requestNextPermissionIfNeeded() {
@@ -523,6 +837,7 @@ public final class MainActivity extends Activity {
         public void onAttach(final UsbDevice device) {
             Log.i(TAG, "onAttach: " + describeDevice(device));
             addLog("USB已插入：" + shortDeviceName(device));
+            mFirstSlotSkippedDeviceNames.remove(device.getDeviceName());
             mUiHandler.postDelayed(mScanRunnable, 300);
         }
 
@@ -564,6 +879,7 @@ public final class MainActivity extends Activity {
         public void onDettach(final UsbDevice device) {
             Log.i(TAG, "onDettach: " + describeDevice(device));
             addLog("USB已拔出：" + shortDeviceName(device));
+            mFirstSlotSkippedDeviceNames.remove(device.getDeviceName());
             mUiHandler.post(new Runnable() {
                 @Override
                 public void run() {
@@ -615,6 +931,11 @@ public final class MainActivity extends Activity {
             final List<Size> yuyvSizes = UVCCamera.getSupportedSize(4, supportedSize);
             addLog("强诊断：第" + (slot.index + 1) + "路支持分辨率 MJPEG="
                 + formatSizes(mjpegSizes) + "；YUYV=" + formatSizes(yuyvSizes));
+            if (isFirstSlotYuyvDisabled(slot.index)) {
+                addLog("强诊断：第1路YUYV已禁用：现场确认该路径会触发libuvc/libusb native崩溃，本轮只探测MJPEG");
+            } else if (slot.index == 0) {
+                addLog("强诊断：第1路YUYV兜底已启用：MJPEG仍无帧时会改试YUYV RAW转JPEG");
+            }
             if (slot.noFrameRetryCount > 0) {
                 addLog("自动重试：第" + (slot.index + 1) + "路第" + slot.noFrameRetryCount
                     + "次重开，策略=" + retryStrategyName(slot.noFrameRetryCount, slot.index));
@@ -649,6 +970,7 @@ public final class MainActivity extends Activity {
                 + "，带宽系数=" + bandwidthFactor + "，打开序号=#" + openSequence);
 
             final boolean yuyvFallback = isYuyvFallbackPreview(preview);
+            final boolean rawMjpegFallback = isRawMjpegPreview(preview);
             if (slot.texture.getSurfaceTexture() != null) {
                 slot.texture.getSurfaceTexture().setDefaultBufferSize(preview.width, preview.height);
             }
@@ -657,18 +979,26 @@ public final class MainActivity extends Activity {
                 camera.setPreviewDisplay(slot.surface);
                 addLog("强诊断：第" + (slot.index + 1)
                     + "路YUYV RAW兜底，已绑定真实预览窗口引出帧回调，并用覆盖层遮挡绿屏");
+            } else if (rawMjpegFallback) {
+                slot.prepareJpegOverlayFallback();
+                camera.setPreviewDisplay(slot.surface);
+                addLog("强诊断：第" + (slot.index + 1)
+                    + "路MJPEG原始帧直通兜底，跳过native解码，直接生成HTTP JPEG流");
             } else {
                 slot.clearJpegOverlay();
                 camera.setPreviewDisplay(slot.surface);
                 addLog("强诊断：第" + (slot.index + 1) + "路预览窗口已绑定");
             }
-            final int callbackPixelFormat = yuyvFallback
-                ? UVCCamera.PIXEL_FORMAT_RAW : UVCCamera.PIXEL_FORMAT_NV21;
-            final String callbackFormatName = yuyvFallback ? "RAW" : "NV21";
+            final int callbackPixelFormat = rawMjpegFallback
+                ? UVCCamera.PIXEL_FORMAT_MJPEG
+                : (yuyvFallback ? UVCCamera.PIXEL_FORMAT_RAW : UVCCamera.PIXEL_FORMAT_NV21);
+            final String callbackFormatName = rawMjpegFallback ? "MJPEG-RAW"
+                : (yuyvFallback ? "RAW" : "NV21");
             camera.setFrameCallback(slot.frameCallback, callbackPixelFormat);
             addLog("强诊断：第" + (slot.index + 1) + "路帧回调已注册，格式="
                 + callbackFormatName
-                + (yuyvFallback ? "，YUYV RAW将由Java转JPEG拉流" : ""));
+                + (rawMjpegFallback ? "，原始MJPEG将直接用于HTTP拉流"
+                    : (yuyvFallback ? "，YUYV RAW将由Java转JPEG拉流" : "")));
             camera.startPreview();
             addLog("强诊断：第" + (slot.index + 1) + "路 startPreview 已调用，等待帧回调");
 
@@ -743,6 +1073,7 @@ public final class MainActivity extends Activity {
                 + "路 MJPEG 默认预览参数失败，尝试YUYV，原因="
                 + previewError.getMessage());
             preview.format = UVCCamera.FRAME_FORMAT_YUYV;
+            preview.rawMjpegCallback = false;
             camera.setPreviewSize(preview.width, preview.height, preview.format, bandwidthFactor);
             return new PreviewSettings(UVCCamera.DEFAULT_PREVIEW_MIN_FPS,
                 UVCCamera.DEFAULT_PREVIEW_MAX_FPS, false);
@@ -781,9 +1112,15 @@ public final class MainActivity extends Activity {
             return chooseLowBandwidthPreviewCandidate(candidates);
         }
         if (slotIndex == 0 && retryCount >= 3) {
-            final PreviewChoice probe = chooseFirstSlotFullProbeCandidate(candidates, retryCount);
+            final PreviewChoice probe = chooseFirstSlotRawMjpegProbeCandidate(mjpegSizes,
+                retryCount);
             if (probe != null) {
                 return probe;
+            }
+            final PreviewChoice fullProbe = chooseFirstSlotFullProbeCandidate(candidates,
+                retryCount, slotIndex);
+            if (fullProbe != null) {
+                return fullProbe;
             }
         }
         if (retryCount == 1) {
@@ -791,6 +1128,11 @@ public final class MainActivity extends Activity {
             return alternateMjpeg != null ? alternateMjpeg : choosePreviewCandidate(candidates, false);
         }
         if (retryCount >= 2) {
+            if (isFirstSlotYuyvDisabled(slotIndex)) {
+                final PreviewChoice alternateMjpeg = chooseFirstSlotFullProbeCandidate(candidates,
+                    retryCount, slotIndex);
+                return alternateMjpeg != null ? alternateMjpeg : choosePreviewCandidate(candidates, false);
+            }
             final PreviewChoice yuyv = chooseFormatPreviewCandidate(yuyvSizes,
                 UVCCamera.FRAME_FORMAT_YUYV);
             if (yuyv != null) {
@@ -803,23 +1145,41 @@ public final class MainActivity extends Activity {
     }
 
     private PreviewChoice chooseFirstSlotFullProbeCandidate(final List<PreviewChoice> candidates,
-        final int retryCount) {
-        final List<PreviewChoice> probeCandidates = buildFullProbeCandidates(candidates);
+        final int retryCount, final int slotIndex) {
+        final List<PreviewChoice> probeCandidates = buildFullProbeCandidates(candidates, slotIndex);
         if (probeCandidates.isEmpty()) return null;
-        final int candidateIndex = retryCount - 3;
+        final int candidateIndex = Math.max(0, retryCount - 2);
         if (candidateIndex >= probeCandidates.size()) {
             return probeCandidates.get(probeCandidates.size() - 1);
         }
         return probeCandidates.get(candidateIndex);
     }
 
-    private List<PreviewChoice> buildFullProbeCandidates(final List<PreviewChoice> candidates) {
+    private PreviewChoice chooseFirstSlotRawMjpegProbeCandidate(final List<Size> mjpegSizes,
+        final int retryCount) {
+        final List<PreviewChoice> candidates = new ArrayList<PreviewChoice>();
+        addPreviewCandidates(candidates, mjpegSizes, UVCCamera.FRAME_FORMAT_MJPEG, true);
+        if (candidates.isEmpty()) return null;
+        final List<PreviewChoice> sorted = buildFullProbeCandidates(candidates, 0);
+        final int candidateIndex = Math.max(0, retryCount - 3);
+        if (candidateIndex >= sorted.size()) {
+            return sorted.get(sorted.size() - 1);
+        }
+        return sorted.get(candidateIndex);
+    }
+
+    private List<PreviewChoice> buildFullProbeCandidates(final List<PreviewChoice> candidates,
+        final int slotIndex) {
         final List<PreviewChoice> result = new ArrayList<PreviewChoice>();
         if (candidates == null) return result;
         for (final PreviewChoice candidate : candidates) {
+            if (isFirstSlotYuyvDisabled(slotIndex)
+                && candidate.format == UVCCamera.FRAME_FORMAT_YUYV) {
+                continue;
+            }
             if (containsPreviewCandidate(result, candidate)) continue;
             final PreviewChoice copy = new PreviewChoice(candidate.width, candidate.height,
-                candidate.format);
+                candidate.format, candidate.rawMjpegCallback);
             int insertIndex = result.size();
             for (int i = 0; i < result.size(); i++) {
                 if (compareFullProbeCandidate(copy, result.get(i)) < 0) {
@@ -837,7 +1197,8 @@ public final class MainActivity extends Activity {
         if (target == null) return true;
         for (final PreviewChoice candidate : candidates) {
             if (candidate.width == target.width && candidate.height == target.height
-                && candidate.format == target.format) {
+                && candidate.format == target.format
+                && candidate.rawMjpegCallback == target.rawMjpegCallback) {
                 return true;
             }
         }
@@ -850,6 +1211,9 @@ public final class MainActivity extends Activity {
         if (leftArea != rightArea) return leftArea - rightArea;
         if (left.width != right.width) return left.width - right.width;
         if (left.height != right.height) return left.height - right.height;
+        if (left.rawMjpegCallback != right.rawMjpegCallback) {
+            return left.rawMjpegCallback ? 1 : -1;
+        }
         if (left.format == right.format) return 0;
         return left.format == UVCCamera.FRAME_FORMAT_MJPEG ? -1 : 1;
     }
@@ -901,7 +1265,28 @@ public final class MainActivity extends Activity {
     }
 
     private boolean isYuyvFallbackPreview(final PreviewChoice preview) {
-        return preview != null && preview.format == UVCCamera.FRAME_FORMAT_YUYV;
+        return preview != null && !preview.rawMjpegCallback
+            && preview.format == UVCCamera.FRAME_FORMAT_YUYV;
+    }
+
+    private boolean isRawMjpegPreview(final PreviewChoice preview) {
+        return preview != null && preview.rawMjpegCallback
+            && preview.format == UVCCamera.FRAME_FORMAT_MJPEG;
+    }
+
+    private boolean usesJpegOverlayPreview(final PreviewChoice preview) {
+        return isYuyvFallbackPreview(preview) || isRawMjpegPreview(preview);
+    }
+
+    private boolean isFirstSlotYuyvDisabled(final int slotIndex) {
+        return slotIndex == 0 && mDisableFirstSlotYuyv;
+    }
+
+    private String firstSlotFullProbeStrategyName() {
+        if (mDisableFirstSlotYuyv) {
+            return "第1路全档位探测，YUYV已关闭，仅轮换MJPEG分辨率";
+        }
+        return "第1路MJPEG原始帧直通探测，绕过native解码生成拉流";
     }
 
     private String retryStrategyName(final int retryCount) {
@@ -911,7 +1296,7 @@ public final class MainActivity extends Activity {
     private String retryStrategyName(final int retryCount, final int slotIndex) {
         if (!LOW_BANDWIDTH_DIAGNOSTIC_MODE) {
             if (slotIndex == 0 && retryCount >= 3) {
-                return "第1路全档位探测，轮换MJPEG/YUYV所有分辨率";
+                return firstSlotFullProbeStrategyName();
             }
             if (retryCount >= 2) {
                 return "MJPEG仍无帧，改试YUYV兼容格式";
@@ -936,9 +1321,14 @@ public final class MainActivity extends Activity {
 
     private void addPreviewCandidates(final List<PreviewChoice> candidates, final List<Size> sizes,
         final int format) {
+        addPreviewCandidates(candidates, sizes, format, false);
+    }
+
+    private void addPreviewCandidates(final List<PreviewChoice> candidates, final List<Size> sizes,
+        final int format, final boolean rawMjpegCallback) {
         if (sizes == null) return;
         for (final Size size : sizes) {
-            candidates.add(new PreviewChoice(size.width, size.height, format));
+            candidates.add(new PreviewChoice(size.width, size.height, format, rawMjpegCallback));
         }
     }
 
@@ -1015,8 +1405,11 @@ public final class MainActivity extends Activity {
             }
             return "未找到320x240及以下，使用兼容带宽系数";
         }
+        if (isRawMjpegPreview(preview)) {
+            return "MJPEG原始帧直通，绕过native解码生成拉流";
+        }
         if (slotIndex == 0 && retryCount >= 3) {
-            return "第1路全档位探测，轮换MJPEG/YUYV所有分辨率";
+            return firstSlotFullProbeStrategyName();
         }
         if (retryCount == 1) {
             return "MJPEG无帧，改试其它MJPEG分辨率";
@@ -1076,6 +1469,17 @@ public final class MainActivity extends Activity {
         return count;
     }
 
+    private int countOpenCamera2Slots() {
+        if (mSlots == null) return 0;
+        int count = 0;
+        for (int i = 0; i < mVisibleSlotCount; i++) {
+            if (mSlots[i].camera2Device != null) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     private void clearRetryPending(final UsbDevice device) {
         if (device == null || mSlots == null) return;
         final String deviceName = device.getDeviceName();
@@ -1087,6 +1491,65 @@ public final class MainActivity extends Activity {
                 slot.refreshLabel();
             }
         }
+    }
+
+    private boolean shouldPromoteFirstSlotAfterNoFrame(final CameraSlot slot) {
+        return mPromoteHealthyFirstSlot
+            && mFirstSlotOnlyMode
+            && slot != null
+            && slot.index == 0
+            && slot.device != null
+            && hasAlternativeFirstSlotCandidate(slot.device.getDeviceName());
+    }
+
+    private boolean shouldPromoteFirstSlotEarly(final CameraSlot slot) {
+        return shouldPromoteFirstSlotAfterNoFrame(slot)
+            && slot.noFrameRetryCount >= FIRST_SLOT_PROMOTE_AFTER_RETRIES;
+    }
+
+    private boolean hasAlternativeFirstSlotCandidate(final String currentDeviceName) {
+        if (mUSBMonitor == null || mFirstSlotDeviceFilter != null) return false;
+        final List<UsbDevice> allDevices = mUSBMonitor.getDeviceList();
+        int skippedByIndex = 0;
+        for (final UsbDevice device : allDevices) {
+            if (!isPotentialUvcDevice(device)) continue;
+            if (mFirstSlotSkipCount > 0 && skippedByIndex < mFirstSlotSkipCount) {
+                skippedByIndex++;
+                continue;
+            }
+            final String deviceName = device.getDeviceName();
+            if (deviceName.equals(currentDeviceName)) continue;
+            if (mFirstSlotSkippedDeviceNames.contains(deviceName)) continue;
+            return true;
+        }
+        return false;
+    }
+
+    private void promoteNextHealthyDeviceForFirstSlot(final CameraSlot slot) {
+        final UsbDevice unhealthyDevice = slot != null ? slot.device : null;
+        if (unhealthyDevice == null) return;
+        if (mFirstSlotPromotionScheduled) {
+            addLog("第1路健康提升：切换下一颗UVC已在执行中，忽略重复触发");
+            return;
+        }
+        mFirstSlotPromotionScheduled = true;
+        final String unhealthyDeviceName = unhealthyDevice.getDeviceName();
+        if (mFirstSlotSkippedDeviceNames.add(unhealthyDeviceName)) {
+            addLog("第1路健康提升：当前设备多档位仍无有效画面，临时跳过 "
+                + shortDeviceName(unhealthyDevice)
+                + "，改把下一颗UVC打开到/stream/0.mjpeg");
+        } else {
+            addLog("第1路健康提升：设备已在临时跳过列表，继续寻找下一颗UVC "
+                + shortDeviceName(unhealthyDevice));
+        }
+        mUiHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                mFirstSlotPromotionScheduled = false;
+                closeAllCameras();
+                scanAndRequestUvcDevices();
+            }
+        }, NO_FRAME_RETRY_DELAY_MS);
     }
 
     private CameraSlot findFreeReadySlot() {
@@ -1119,6 +1582,7 @@ public final class MainActivity extends Activity {
         mQueuedDeviceNames.clear();
         mWaitingForPermission = false;
         mPermissionRequestScheduled = false;
+        mFirstSlotPromotionScheduled = false;
         mPermissionDeviceName = null;
         mLastPermissionRequestMs = 0;
         mOpenSequence = 0;
@@ -1181,12 +1645,19 @@ public final class MainActivity extends Activity {
         if (prefix != null) {
             sb.append(prefix).append(" | ");
         }
-        sb.append("USB=").append(mLastUsbCount)
-            .append(" UVC=").append(mLastUvcCount)
-            .append(" opened=").append(mOpenedByDeviceName.size())
-            .append("/").append(mVisibleSlotCount)
-            .append(" max=").append(MAX_CAMERAS)
-            .append(" pending=").append(mPermissionQueue.size());
+        if (mUseCamera2) {
+            sb.append("Camera2=").append(mLastCamera2Count)
+                .append(" opened=").append(countOpenCamera2Slots())
+                .append("/").append(mVisibleSlotCount)
+                .append(" max=").append(MAX_CAMERAS);
+        } else {
+            sb.append("USB=").append(mLastUsbCount)
+                .append(" UVC=").append(mLastUvcCount)
+                .append(" opened=").append(mOpenedByDeviceName.size())
+                .append("/").append(mVisibleSlotCount)
+                .append(" max=").append(MAX_CAMERAS)
+                .append(" pending=").append(mPermissionQueue.size());
+        }
         if (mFirstSlotOnlyMode) {
             sb.append(" 第1路独占");
         }
@@ -1301,6 +1772,10 @@ public final class MainActivity extends Activity {
         Surface hiddenSurface;
         UsbDevice device;
         UVCCamera camera;
+        String camera2Id;
+        CameraDevice camera2Device;
+        CameraCaptureSession camera2Session;
+        boolean camera2Opening;
         PreviewChoice preview;
         String supportedSizeJson;
         String status = "EMPTY";
@@ -1344,7 +1819,11 @@ public final class MainActivity extends Activity {
                         mStreamHub.onSlotReady(index);
                     }
                     refreshLabel();
-                    requestNextPermissionIfNeeded();
+                    if (mUseCamera2) {
+                        openCamera2IfReady();
+                    } else {
+                        requestNextPermissionIfNeeded();
+                    }
                 }
 
                 @Override
@@ -1368,6 +1847,9 @@ public final class MainActivity extends Activity {
 
                 @Override
                 public void onSurfaceTextureUpdated(final SurfaceTexture surfaceTexture) {
+                    if (camera2Device != null) {
+                        handleCamera2SurfaceUpdated();
+                    }
                     handleVisibleSurfaceUpdated();
                 }
             });
@@ -1423,7 +1905,11 @@ public final class MainActivity extends Activity {
                     final PreviewChoice currentPreview = preview;
                     logFrameDiagnostic(frames, frame, currentPreview);
                     if (mStreamHub != null && currentPreview != null) {
-                        if (isYuyvFallbackPreview(currentPreview)) {
+                        if (isRawMjpegPreview(currentPreview)) {
+                            mStreamHub.onMjpegFrame(index, frame, currentPreview.width,
+                                currentPreview.height);
+                            updateJpegOverlayIfNeeded();
+                        } else if (isYuyvFallbackPreview(currentPreview)) {
                             mStreamHub.onYuyvFrame(index, frame, currentPreview.width,
                                 currentPreview.height);
                             updateJpegOverlayIfNeeded();
@@ -1436,8 +1922,200 @@ public final class MainActivity extends Activity {
             refreshLabel();
         }
 
+        void assignCamera2(final String newCamera2Id, final int openSeq) {
+            if (newCamera2Id == null) return;
+            if (camera2Device != null && newCamera2Id.equals(camera2Id)) {
+                return;
+            }
+            closeCamera();
+            camera2Id = newCamera2Id;
+            openSequence = openSeq;
+            preview = new PreviewChoice(TARGET_WIDTH, TARGET_HEIGHT, UVCCamera.FRAME_FORMAT_MJPEG);
+            previewReason = "官方Camera2/HAL路径，按cameraIdList顺序打开";
+            openStrategy = previewReason;
+            status = surface != null ? "READY" : "EMPTY";
+            frameCount.set(0);
+            lastFrameCount = 0;
+            lastFpsTimestampMs = System.currentTimeMillis();
+            firstFrameLogged = false;
+            lastFrameDebugLogMs = 0;
+            refreshLabel();
+            openCamera2IfReady();
+        }
+
+        void handleCamera2SurfaceUpdated() {
+            final long frames = frameCount.incrementAndGet();
+            final long now = System.currentTimeMillis();
+            if (!firstFrameLogged || now - lastFrameDebugLogMs > FRAME_DEBUG_LOG_INTERVAL_MS) {
+                firstFrameLogged = true;
+                lastFrameDebugLogMs = now;
+                addLog("Camera2：第" + (index + 1) + "路画面"
+                    + (frames == 1 ? "首次到达" : "持续更新")
+                    + "，cameraId=" + camera2Id + "，帧数=" + frames);
+            }
+        }
+
+        void openCamera2IfReady() {
+            if (!mUseCamera2 || camera2Id == null || camera2Device != null || camera2Opening) {
+                return;
+            }
+            if (surface == null || texture.getSurfaceTexture() == null) {
+                addLog("Camera2：第" + (index + 1) + "路等待预览Surface就绪，id=" + camera2Id);
+                return;
+            }
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP || mCamera2Manager == null) {
+                status = "OPEN FAILED: Camera2不可用";
+                refreshLabel();
+                return;
+            }
+            if (!ensureCamera2Permission()) return;
+
+            try {
+                texture.getSurfaceTexture().setDefaultBufferSize(TARGET_WIDTH, TARGET_HEIGHT);
+                camera2Opening = true;
+                status = "OPENING";
+                refreshLabel();
+                final String openCameraId = camera2Id;
+                addLog("Camera2：准备打开第" + (index + 1) + "路，cameraId="
+                    + openCameraId + "，surface=已就绪，打开序号=#" + openSequence);
+                mCamera2Manager.openCamera(openCameraId, new CameraDevice.StateCallback() {
+                    @Override
+                    public void onOpened(final CameraDevice cameraDevice) {
+                        camera2Opening = false;
+                        camera2Device = cameraDevice;
+                        status = "OPEN";
+                        addLog("Camera2：第" + (index + 1) + "路 open 成功，cameraId="
+                            + openCameraId);
+                        createCamera2PreviewSession(openCameraId, cameraDevice);
+                    }
+
+                    @Override
+                    public void onDisconnected(final CameraDevice cameraDevice) {
+                        addLog("Camera2：第" + (index + 1) + "路已断开，cameraId="
+                            + openCameraId);
+                        camera2Opening = false;
+                        if (camera2Device == cameraDevice) {
+                            camera2Device = null;
+                        }
+                        try {
+                            cameraDevice.close();
+                        } catch (final Exception ignored) {
+                        }
+                        status = surface != null ? "READY" : "EMPTY";
+                        refreshLabel();
+                    }
+
+                    @Override
+                    public void onError(final CameraDevice cameraDevice, final int error) {
+                        addLog("Camera2：第" + (index + 1) + "路打开错误，cameraId="
+                            + openCameraId + "，error=" + error);
+                        camera2Opening = false;
+                        if (camera2Device == cameraDevice) {
+                            camera2Device = null;
+                        }
+                        try {
+                            cameraDevice.close();
+                        } catch (final Exception ignored) {
+                        }
+                        status = "OPEN FAILED: Camera2 error=" + error;
+                        if (mStreamHub != null) {
+                            mStreamHub.onSlotClosed(index, status);
+                        }
+                        refreshLabel();
+                    }
+                }, null);
+            } catch (final SecurityException e) {
+                camera2Opening = false;
+                status = "OPEN FAILED: 无Camera权限";
+                addLog("Camera2：第" + (index + 1) + "路打开失败，无Camera权限");
+                refreshLabel();
+            } catch (final Exception e) {
+                camera2Opening = false;
+                status = "OPEN FAILED: " + e.getMessage();
+                addLog("Camera2：第" + (index + 1) + "路打开异常：" + e.getMessage());
+                refreshLabel();
+            }
+        }
+
+        void createCamera2PreviewSession(final String openCameraId,
+            final CameraDevice cameraDevice) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return;
+            try {
+                final Surface previewSurface = surface;
+                if (previewSurface == null) {
+                    addLog("Camera2：第" + (index + 1) + "路预览Surface为空，等待重试");
+                    return;
+                }
+                cameraDevice.createCaptureSession(Arrays.asList(previewSurface),
+                    new CameraCaptureSession.StateCallback() {
+                        @Override
+                        public void onConfigured(final CameraCaptureSession session) {
+                            if (camera2Device != cameraDevice) {
+                                try {
+                                    session.close();
+                                } catch (final Exception ignored) {
+                                }
+                                return;
+                            }
+                            camera2Session = session;
+                            try {
+                                final CaptureRequest.Builder builder =
+                                    cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+                                builder.addTarget(previewSurface);
+                                final Range<Integer> fpsRange = chooseCamera2FpsRange(openCameraId);
+                                if (fpsRange != null) {
+                                    builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange);
+                                }
+                                session.setRepeatingRequest(builder.build(), null, null);
+                                status = "OPEN";
+                                openedAtMs = System.currentTimeMillis();
+                                addLog("Camera2：第" + (index + 1)
+                                    + "路预览已启动，cameraId=" + openCameraId
+                                    + "，尺寸=" + TARGET_WIDTH + "x" + TARGET_HEIGHT
+                                    + "，fpsRange=" + formatCamera2FpsRange(fpsRange)
+                                    + "，抓图间隔=" + SURFACE_CAPTURE_INTERVAL_MS + "ms");
+                                if (mStreamHub != null) {
+                                    mStreamHub.onSlotOpened(index,
+                                        "Camera2 id=" + openCameraId,
+                                        TARGET_WIDTH, TARGET_HEIGHT, "Camera2Surface",
+                                        openSequence, 0, 0, false, 0f,
+                                        previewReason, false);
+                                }
+                                refreshLabel();
+                            } catch (final Exception e) {
+                                status = "OPEN FAILED: " + e.getMessage();
+                                addLog("Camera2：第" + (index + 1)
+                                    + "路启动预览失败：" + e.getMessage());
+                                if (mStreamHub != null) {
+                                    mStreamHub.onSlotClosed(index, status);
+                                }
+                                refreshLabel();
+                            }
+                        }
+
+                        @Override
+                        public void onConfigureFailed(final CameraCaptureSession session) {
+                            status = "OPEN FAILED: Camera2 session configure failed";
+                            addLog("Camera2：第" + (index + 1)
+                                + "路预览Session配置失败，cameraId=" + openCameraId);
+                            if (mStreamHub != null) {
+                                mStreamHub.onSlotClosed(index, status);
+                            }
+                            refreshLabel();
+                        }
+                    }, null);
+            } catch (final CameraAccessException e) {
+                status = "OPEN FAILED: " + e.getMessage();
+                addLog("Camera2：第" + (index + 1) + "路创建Session异常：" + e.getMessage());
+                if (mStreamHub != null) {
+                    mStreamHub.onSlotClosed(index, status);
+                }
+                refreshLabel();
+            }
+        }
+
         boolean isFree() {
-            return camera == null;
+            return camera == null && camera2Device == null && !camera2Opening;
         }
 
         Surface ensureHiddenPreviewSurface(final int width, final int height) {
@@ -1464,6 +2142,10 @@ public final class MainActivity extends Activity {
         }
 
         void prepareYuyvVisibleSurfaceFallback() {
+            prepareJpegOverlayFallback();
+        }
+
+        void prepareJpegOverlayFallback() {
             lastJpegOverlayUpdateMs = 0;
             jpegOverlay.setImageDrawable(null);
             jpegOverlay.setBackgroundColor(Color.BLACK);
@@ -1482,7 +2164,7 @@ public final class MainActivity extends Activity {
             mUiHandler.post(new Runnable() {
                 @Override
                 public void run() {
-                    if (preview == null || !isYuyvFallbackPreview(preview)) return;
+                    if (preview == null || !usesJpegOverlayPreview(preview)) return;
                     jpegOverlay.setImageBitmap(bitmap);
                     jpegOverlay.setVisibility(View.VISIBLE);
                 }
@@ -1500,12 +2182,13 @@ public final class MainActivity extends Activity {
         }
 
         boolean shouldCaptureSurfaceFallback(final PreviewChoice currentPreview) {
-            return index == 0
-                && mStreamHub != null
-                && "OPEN".equals(status)
-                && camera != null
-                && currentPreview != null
-                && frameCount.get() == 0;
+            if (mStreamHub == null || !"OPEN".equals(status) || currentPreview == null) {
+                return false;
+            }
+            if (camera2Device != null) {
+                return true;
+            }
+            return index == 0 && camera != null && frameCount.get() == 0;
         }
 
         void captureSurfaceJpegFallback(final PreviewChoice currentPreview, final long now) {
@@ -1534,17 +2217,23 @@ public final class MainActivity extends Activity {
                 mStreamHub.onSurfaceJpegFrame(index, jpeg, bitmapWidth, bitmapHeight);
                 lastSurfaceCaptureJpegMs = now;
                 surfaceCaptureJpegCount++;
-                if (isYuyvFallbackPreview(currentPreview)) {
+                if (usesJpegOverlayPreview(currentPreview)) {
                     final Bitmap overlayBitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
                     if (overlayBitmap != null) {
                         jpegOverlay.setImageBitmap(overlayBitmap);
                         jpegOverlay.setVisibility(View.VISIBLE);
                     }
                 }
-                logSurfaceCaptureThrottled("强诊断：第1路Surface抓图兜底已生成JPEG，预览="
-                    + currentPreview.width + "x" + currentPreview.height + " "
-                    + currentPreview.formatName() + "，SurfaceJPEG=" + surfaceCaptureJpegCount
-                    + "，frameCallback仍为0", now);
+                if (camera2Device != null) {
+                    logSurfaceCaptureThrottled("Camera2：第" + (index + 1)
+                        + "路TextureView抓图已生成HTTP JPEG，cameraId=" + camera2Id
+                        + "，SurfaceJPEG=" + surfaceCaptureJpegCount, now);
+                } else {
+                    logSurfaceCaptureThrottled("强诊断：第1路Surface抓图兜底已生成JPEG，预览="
+                        + currentPreview.width + "x" + currentPreview.height + " "
+                        + currentPreview.formatName() + "，SurfaceJPEG=" + surfaceCaptureJpegCount
+                        + "，frameCallback仍为0", now);
+                }
             } catch (final Exception e) {
                 logSurfaceCaptureThrottled("强诊断：第1路Surface抓图异常：" + e.getMessage(), now);
             } finally {
@@ -1565,7 +2254,7 @@ public final class MainActivity extends Activity {
             if (firstFrameLogged && now - lastFrameDebugLogMs < FRAME_DEBUG_LOG_INTERVAL_MS) return;
             firstFrameLogged = true;
             lastFrameDebugLogMs = now;
-            if (noFrameRetryCount > 0) {
+            if (noFrameRetryCount > 0 && !isRawMjpegPreview(currentPreview)) {
                 addLog("自动重试：第" + (index + 1) + "路重试后已收到帧，帧数=" + frames);
                 noFrameRetryCount = 0;
                 retryDeviceName = null;
@@ -1579,7 +2268,8 @@ public final class MainActivity extends Activity {
             addLog("强诊断：第" + (index + 1) + "路帧回调"
                 + (frames == 1 ? "首次到达" : "持续到达")
                 + "，帧数=" + frames + "，buffer=" + bufferBytes + "，" + previewText
-                + (isYuyvFallbackPreview(currentPreview) ? "，YUYV RAW将转JPEG" : ""));
+                    + (isRawMjpegPreview(currentPreview) ? "，MJPEG原始帧将直通/拼接为JPEG"
+                        : (isYuyvFallbackPreview(currentPreview) ? "，YUYV RAW将转JPEG" : "")));
         }
 
         void refreshFps() {
@@ -1630,8 +2320,16 @@ public final class MainActivity extends Activity {
                 return;
             }
             if (frames > 0) {
-                if (verbose) addLog("自动重试监控：第" + (index + 1) + "路已收到帧，不需要重试");
-                return;
+                final boolean rawMjpegWaitingForJpeg = isRawMjpegPreview(preview)
+                    && (mStreamHub == null || mStreamHub.getLatestJpegData(index) == null);
+                if (!rawMjpegWaitingForJpeg) {
+                    if (verbose) addLog("自动重试监控：第" + (index + 1) + "路已收到帧，不需要重试");
+                    return;
+                }
+                if (verbose) {
+                    addLog("自动重试监控：第" + (index + 1)
+                        + "路MJPEG原始帧已有回调但尚未拼出JPEG，继续换档位探测");
+                }
             }
             if (lastSurfaceCaptureJpegMs > 0 && now - lastSurfaceCaptureJpegMs < 3000) {
                 if (verbose) addLog("自动重试监控：第" + (index + 1)
@@ -1652,10 +2350,18 @@ public final class MainActivity extends Activity {
                 if (verbose) addLog("自动重试监控：第" + (index + 1) + "路未到检查时间");
                 return;
             }
+            if (shouldPromoteFirstSlotEarly(this)) {
+                addLog("第1路健康提升：已完成MJPEG/YUYV/MJPEG-RAW关键兜底，仍未得到有效JPEG，提前切到下一颗UVC");
+                promoteNextHealthyDeviceForFirstSlot(this);
+                return;
+            }
             if (noFrameRetryCount >= maxNoFrameRetries()) {
                 if (!retryLimitLogged) {
                     retryLimitLogged = true;
                     addLog("自动重试：第" + (index + 1) + "路仍无帧，已达到最大重试次数，请检查USB带宽/供电/摄像头口");
+                    if (shouldPromoteFirstSlotAfterNoFrame(this)) {
+                        promoteNextHealthyDeviceForFirstSlot(this);
+                    }
                 }
                 return;
             }
@@ -1697,7 +2403,8 @@ public final class MainActivity extends Activity {
             if (preview != null) {
                 sb.append("\n")
                     .append(preview.width).append("x").append(preview.height)
-                    .append(" ").append(preview.formatName());
+                    .append(" ")
+                    .append(camera2Id != null ? "Camera2Surface" : preview.formatName());
                 if (openSequence > 0) {
                     sb.append(" #").append(openSequence);
                 }
@@ -1710,6 +2417,9 @@ public final class MainActivity extends Activity {
             }
             if (device != null) {
                 sb.append("\n").append(shortDeviceName(device));
+            }
+            if (camera2Id != null) {
+                sb.append("\nCamera2 id=").append(camera2Id);
             }
             sb.append("\n帧数=").append(frameCount.get())
                 .append(" fps=").append(String.format(Locale.US, "%.1f", fps));
@@ -1737,6 +2447,7 @@ public final class MainActivity extends Activity {
             if (rawStatus == null) return "未知";
             if ("EMPTY".equals(rawStatus)) return "未就绪";
             if ("READY".equals(rawStatus)) return "可打开";
+            if ("OPENING".equals(rawStatus)) return "打开中";
             if ("OPEN".equals(rawStatus)) return "已打开";
             if ("SURFACE DESTROYED".equals(rawStatus)) return "预览窗口已销毁";
             if (rawStatus.startsWith("OPEN FAILED")) return "打开失败" + rawStatus.substring("OPEN FAILED".length());
@@ -1749,11 +2460,17 @@ public final class MainActivity extends Activity {
 
         void closeCamera(final boolean resetRetryState) {
             final UVCCamera cameraToClose = camera;
+            final CameraCaptureSession camera2SessionToClose = camera2Session;
+            final CameraDevice camera2DeviceToClose = camera2Device;
             camera = null;
+            camera2Session = null;
+            camera2Device = null;
+            camera2Opening = false;
             if (device != null) {
                 mOpenedByDeviceName.remove(device.getDeviceName());
             }
             device = null;
+            camera2Id = null;
             preview = null;
             supportedSizeJson = null;
             openSequence = 0;
@@ -1802,6 +2519,23 @@ public final class MainActivity extends Activity {
                     Log.w(TAG, "destroy failed on slot " + (index + 1), e);
                 }
             }
+            if (camera2SessionToClose != null) {
+                addLog("正在关闭第" + (index + 1) + "路Camera2预览");
+                try {
+                    camera2SessionToClose.stopRepeating();
+                } catch (final Exception ignored) {
+                }
+                try {
+                    camera2SessionToClose.close();
+                } catch (final Exception ignored) {
+                }
+            }
+            if (camera2DeviceToClose != null) {
+                try {
+                    camera2DeviceToClose.close();
+                } catch (final Exception ignored) {
+                }
+            }
             refreshLabel();
         }
     }
@@ -1810,14 +2544,24 @@ public final class MainActivity extends Activity {
         final int width;
         final int height;
         int format;
+        boolean rawMjpegCallback;
 
         PreviewChoice(final int previewWidth, final int previewHeight, final int previewFormat) {
+            this(previewWidth, previewHeight, previewFormat, false);
+        }
+
+        PreviewChoice(final int previewWidth, final int previewHeight, final int previewFormat,
+            final boolean useRawMjpegCallback) {
             width = previewWidth;
             height = previewHeight;
             format = previewFormat;
+            rawMjpegCallback = useRawMjpegCallback;
         }
 
         String formatName() {
+            if (rawMjpegCallback && format == UVCCamera.FRAME_FORMAT_MJPEG) {
+                return "MJPEG-RAW";
+            }
             return format == UVCCamera.FRAME_FORMAT_MJPEG ? "MJPEG" : "YUYV";
         }
     }

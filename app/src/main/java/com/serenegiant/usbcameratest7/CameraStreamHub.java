@@ -35,6 +35,8 @@ final class CameraStreamHub {
     private static final int MIN_JPEG_INTERVAL_MS = 200;
     private static final int CLIENT_IDLE_SLEEP_MS = 100;
     private static final long DIAGNOSTIC_LOG_INTERVAL_MS = 5000;
+    private static final int MAX_MJPEG_ASSEMBLY_BYTES = 2 * 1024 * 1024;
+    private static final long MAX_MJPEG_ASSEMBLY_AGE_MS = 3000;
     private static final String BOUNDARY = "keenonframe";
 
     private final SlotState[] mSlots;
@@ -122,6 +124,8 @@ final class CameraStreamHub {
         final long now = System.currentTimeMillis();
         slot.latestJpegData = jpeg;
         slot.latestJpegTimestampMs = now;
+        slot.latestFrameCallbackMs = now;
+        slot.lastFrameBufferBytes = jpeg.length;
         slot.width = width;
         slot.height = height;
         slot.formatName = "SurfaceJPEG";
@@ -130,6 +134,45 @@ final class CameraStreamHub {
             slot.lastJpegSuccessLogMs = now;
             log("强诊断：第" + (slotIndex + 1) + "路Surface抓图JPEG已生成，来源=TextureView->JPEG"
                 + "，JPEG帧=" + jpegFrames + "，大小=" + jpeg.length + "字节");
+        }
+    }
+
+    void onMjpegFrame(final int slotIndex, final ByteBuffer frame, final int width,
+        final int height) {
+        if (!isValidSlot(slotIndex) || frame == null || width <= 0 || height <= 0) return;
+        final SlotState slot = mSlots[slotIndex];
+        final long now = System.currentTimeMillis();
+        final ByteBuffer source = frame.asReadOnlyBuffer();
+        source.clear();
+        slot.latestFrameCallbackMs = now;
+        slot.lastFrameBufferBytes = source.remaining();
+        slot.width = width;
+        slot.height = height;
+        slot.formatName = "MJPEG-RAW";
+        if (source.remaining() <= 0) return;
+
+        try {
+            final byte[] raw = new byte[source.remaining()];
+            source.get(raw);
+            final byte[] jpeg = extractOrAssembleJpeg(slot, raw, now);
+            if (jpeg == null || jpeg.length == 0) {
+                logJpegWarning(slot, now, "第" + (slotIndex + 1)
+                    + "路MJPEG原始帧尚未拼出完整JPEG：buffer=" + raw.length
+                    + "，已拼接=" + assembledBytes(slot));
+                return;
+            }
+            slot.latestJpegData = jpeg;
+            slot.latestJpegTimestampMs = now;
+            final long jpegFrames = slot.jpegCount.incrementAndGet();
+            if (jpegFrames == 1 || now - slot.lastJpegSuccessLogMs > DIAGNOSTIC_LOG_INTERVAL_MS) {
+                slot.lastJpegSuccessLogMs = now;
+                log("强诊断：第" + (slotIndex + 1)
+                    + "路MJPEG原始帧已直通为JPEG，来源=MJPEG-RAW"
+                    + "，JPEG帧=" + jpegFrames + "，大小=" + jpeg.length + "字节");
+            }
+        } catch (final Exception e) {
+            logJpegWarning(slot, now, "第" + (slotIndex + 1)
+                + "路MJPEG原始帧直通异常：" + e.getMessage());
         }
     }
 
@@ -190,6 +233,8 @@ final class CameraStreamHub {
         slot.lastFrameBufferBytes = 0;
         slot.lastJpegSuccessLogMs = 0;
         slot.lastJpegWarnLogMs = 0;
+        slot.mjpegAssembly = null;
+        slot.mjpegAssemblyStartedMs = 0;
         slot.jpegCount.set(0);
         log("第" + (slotIndex + 1) + "路拉流已就绪：" + getStreamUrl(slotIndex)
             + "，打开序号=#" + openSequence + "，fps=" + fpsMin + "-" + fpsMax
@@ -220,6 +265,8 @@ final class CameraStreamHub {
         slot.lastFrameBufferBytes = 0;
         slot.lastJpegSuccessLogMs = 0;
         slot.lastJpegWarnLogMs = 0;
+        slot.mjpegAssembly = null;
+        slot.mjpegAssemblyStartedMs = 0;
         slot.jpegCount.set(0);
     }
 
@@ -341,6 +388,81 @@ final class CameraStreamHub {
             slot.lastJpegWarnLogMs = now;
             log(message);
         }
+    }
+
+    private byte[] extractJpegBytes(final byte[] raw) {
+        if (raw == null || raw.length < 4) return null;
+        final int start = findJpegStart(raw, 0);
+        if (start < 0) return null;
+        final int end = findJpegEnd(raw, start);
+        if (end <= start) return null;
+        final int length = end - start;
+        final byte[] jpeg = new byte[length];
+        System.arraycopy(raw, start, jpeg, 0, length);
+        return jpeg;
+    }
+
+    private byte[] extractOrAssembleJpeg(final SlotState slot, final byte[] raw, final long now) {
+        final byte[] complete = extractJpegBytes(raw);
+        if (complete != null) {
+            slot.mjpegAssembly = null;
+            slot.mjpegAssemblyStartedMs = 0;
+            return complete;
+        }
+
+        final int start = findJpegStart(raw, 0);
+        if (start >= 0 || slot.mjpegAssembly != null) {
+            if (start >= 0) {
+                slot.mjpegAssembly = new ByteArrayOutputStream(
+                    Math.max(4096, Math.min(MAX_MJPEG_ASSEMBLY_BYTES, raw.length * 4)));
+                slot.mjpegAssemblyStartedMs = now;
+                slot.mjpegAssembly.write(raw, start, raw.length - start);
+            } else {
+                slot.mjpegAssembly.write(raw, 0, raw.length);
+            }
+
+            final byte[] assembled = slot.mjpegAssembly.toByteArray();
+            final int end = findJpegEnd(assembled, 0);
+            if (end > 0) {
+                final byte[] jpeg = new byte[end];
+                System.arraycopy(assembled, 0, jpeg, 0, end);
+                slot.mjpegAssembly = null;
+                slot.mjpegAssemblyStartedMs = 0;
+                return jpeg;
+            }
+
+            if (assembled.length > MAX_MJPEG_ASSEMBLY_BYTES
+                || (slot.mjpegAssemblyStartedMs > 0
+                    && now - slot.mjpegAssemblyStartedMs > MAX_MJPEG_ASSEMBLY_AGE_MS)) {
+                slot.mjpegAssembly = null;
+                slot.mjpegAssemblyStartedMs = 0;
+            }
+        }
+        return null;
+    }
+
+    private int assembledBytes(final SlotState slot) {
+        return slot.mjpegAssembly != null ? slot.mjpegAssembly.size() : 0;
+    }
+
+    private int findJpegStart(final byte[] raw, final int offset) {
+        if (raw == null) return -1;
+        for (int i = Math.max(0, offset); i + 1 < raw.length; i++) {
+            if ((raw[i] & 0xff) == 0xff && (raw[i + 1] & 0xff) == 0xd8) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int findJpegEnd(final byte[] raw, final int offset) {
+        if (raw == null) return -1;
+        for (int i = Math.max(0, offset); i + 1 < raw.length; i++) {
+            if ((raw[i] & 0xff) == 0xff && (raw[i + 1] & 0xff) == 0xd9) {
+                return i + 2;
+            }
+        }
+        return -1;
     }
 
     private void acceptLoop() {
@@ -633,6 +755,8 @@ final class CameraStreamHub {
         volatile long lastJpegEncodeMs;
         volatile long lastJpegSuccessLogMs;
         volatile long lastJpegWarnLogMs;
+        volatile ByteArrayOutputStream mjpegAssembly;
+        volatile long mjpegAssemblyStartedMs;
 
         SlotState(final int slotIndex) {
             index = slotIndex;
