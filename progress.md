@@ -463,6 +463,21 @@
 - `docs/eight-camera-probe.md`: documented receiver-side parsing expectations for the active push path.
 - `progress.md`: appended this implementation record.
 - Rollback: revert this task's commit to remove active WebSocket pushing while preserving the existing HTTP pull stream behavior.
+
+## 2026-07-08 - Task: Fix release notes for WebSocket push release
+
+### What was done
+- Updated the published `v0.1.1` GitHub Release body so the page now describes the Camera2/HAL path, active WebSocket push target, 4-route JPEG payload format, and receiver-side parsing expectations.
+- Updated the GitHub Actions release-notes template so future releases no longer publish the outdated HTTP-only notes.
+
+### Testing
+- Verified `gh release edit v0.1.1` completed successfully and returned the release URL.
+- Reviewed the workflow diff to confirm the generated notes now mention WebSocket push, the `KJPG` binary header, and onsite push-status logs.
+
+### Notes
+- `.github/workflows/release.yml`: updated the generated release notes body for future tag-triggered APK releases.
+- `progress.md`: appended this release-notes correction record.
+- Rollback: revert this task's commit to restore the previous release-notes template; manually edit `v0.1.1` Release again if the published body also needs rollback.
 ## 2026-07-02 - Task: Add Camera2 official-compatible stable preview release
 
 ### What was done

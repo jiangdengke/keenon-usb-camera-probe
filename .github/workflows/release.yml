@@ -83,13 +83,16 @@ jobs:
         run: |
           cat > release/RELEASE_NOTES.md <<EOF
           ## 更新内容
-          - 增加 HTTP MJPEG 多路拉流服务，提供 /cameras、/stream/{slot}.mjpeg 和 /snapshot/{slot}.jpg
-          - 在 App 页面展示机器人局域网访问地址，方便同网段设备直接访问
-          - 增加摄像头运行日志和每路健康状态，便于排查摄像头异常
+          - 默认使用 Android Camera2/HAL 官方兼容路径打开摄像头，贴近 Keenon 官方 CurrencyCameraActivity 调用方式
+          - 保留 HTTP MJPEG 拉流服务，继续提供 /cameras、/stream/{slot}.mjpeg 和 /snapshot/{slot}.jpg 作为回退验证入口
+          - 默认启用主动 WebSocket 推流，将 4 路 JPEG 通过一个长连接推送到 ws://192.168.112.194:9090/
+          - WebSocket 二进制消息使用 KJPG 头携带 slotIndex、timestamp、sequence、width、height 和 jpegLength，接收端按 slotIndex 区分 4 路
+          - 默认每路 500ms 推送一帧 JPEG，可通过 ADB extra 覆盖推流开关、目标地址、路数和间隔
 
           ## 验证
           - GitHub Actions 自动构建 Android debug APK
           - APK 包含 armeabi-v7a 与 arm64-v8a native 库
+          - 现场日志可通过 WebSocket主动推流已启用、WebSocket推流已连接 和 WebSocket推流状态 确认推流链路
 
           ## 安装
           \`\`\`bash
