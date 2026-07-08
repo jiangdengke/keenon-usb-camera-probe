@@ -501,3 +501,18 @@
 - `docs/eight-camera-probe.md`: documented Camera2/HAL runtime behavior and field verification signals.
 - `progress.md`: appended this implementation record.
 - Rollback: revert commit `v0.1.0-beta.24` to return to the previous beta23 USB/libuvc-first behavior, or launch with Camera2 disabled via ADB extra to use the older path.
+
+## 2026-07-08 - Task: Rewrite README for delivery and WebSocket integration
+
+### What was done
+- Rewrote the README around the current delivery flow: Camera2/HAL acquisition, active WebSocket push, and HTTP MJPEG fallback.
+- Added receiver-facing protocol details for the `KJPG` WebSocket binary payload, including slot routing and JPEG validation expectations.
+- Added installation, ADB override, onsite verification, troubleshooting, build, release, and historical USB/libuvc compatibility guidance.
+
+### Testing
+- Documentation-only change; no APK rebuild required.
+
+### Notes
+- `README.md`: replaced the old UVC-probe-oriented guide with a v0.1.1 delivery and receiver integration guide.
+- `progress.md`: appended this documentation record.
+- Rollback: revert this task's commit to restore the previous README and progress record.
