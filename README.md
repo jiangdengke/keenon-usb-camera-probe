@@ -13,6 +13,7 @@
 - App 内运行日志尽量使用中文，方便现场人员直接判断扫描、授权、打开失败、拉流和健康状态。
 - 默认启用官方兼容模式：优先通过 Android Camera2/HAL 的 `cameraIdList` 打开摄像头，贴近官方 `CurrencyCameraActivity` 调用方式；如需回到旧 USB/libuvc 路径，可通过 ADB extra 关闭 Camera2 模式。
 - Camera2 模式下仍复用现有 HTTP 拉流入口，通过 `TextureView` 抓图生成 `/stream/N.mjpeg` 和 `/snapshot/N.jpg`；为降低现场闪屏，抓图间隔降为 800ms，并按设备支持情况优先选择接近 10-15fps 的 Camera2 预览帧率范围。
+- 默认启用主动 WebSocket 推流：App 会把 4 路最新 JPEG 通过一个 WebSocket 长连接推到 `ws://192.168.112.194:9090/`，每路默认 500ms 推一帧；原有 HTTP 拉流入口仍保留作为回退验证。
 - 内置强诊断日志会记录每路摄像头的打开阶段、支持分辨率、实际选用分辨率、帧回调、JPEG 生成和健康诊断，方便定位单路无画面原因。
 - 某一路打开后 5 秒仍无帧回调时会自动重开，最多重试 2 次；兼容恢复模式下会先改试其它 MJPEG 分辨率，再改试 YUYV。YUYV 兜底会绑定真实预览窗口引出帧回调，同时用覆盖层遮挡绿屏，并请求 RAW 回调由 Java 转 JPEG 用于格子显示、拉流和截图。若第 1 路真实预览 Surface 已刷新但 Java 帧回调仍为 0，App 会尝试从 `TextureView` 抓图生成 JPEG，作为 `/stream/0.mjpeg` 的兜底来源。
 - 启动日志会显示当前 App 版本；每路打开后会单独打印“自动重试监控”启动和 5 秒检查结果，避免现场看不出为什么没有触发重试。
@@ -190,6 +191,7 @@ Workflow 会执行：
 - 日志里出现“MJPEG仍无帧，改试YUYV兼容格式”：说明 MJPEG 候选仍没有帧，App 正在尝试 YUYV 格式。
 - 日志里出现“第1路全档位探测”：说明第 1 路前几档仍无帧，App 正在把该设备声明支持的 MJPEG/YUYV 分辨率按从小到大自动轮换，最多重试 10 次；只要任一档位出现 `帧回调首次到达`、`JPEG已生成` 或 `Surface抓图JPEG已生成`，就立即测试 `/stream/0.mjpeg` 和 `/snapshot/0.jpg`。
 - 日志里出现“官方兼容模式已启用”、“Camera2扫描结果”、“fpsRange”或“抓图间隔=800ms”：说明当前走的是 Android Camera2/HAL 路径，不再依赖 USB/libuvc 帧回调；现场重点确认每个格子是否有画面、`Camera2：第N路画面首次到达` 是否出现，以及 `/stream/N.mjpeg` 是否能访问。
+- 日志里出现“WebSocket主动推流已启用”、“WebSocket推流已连接”或“WebSocket推流状态”：说明 App 正在主动推送 JPEG 到 `ws://192.168.112.194:9090/`。接收端需要按 `KJPG` 二进制头解析 `slotIndex=0..3` 和后续 JPEG 数据；如果看到“连接/发送失败”，优先检查接收端 WebSocket 服务是否监听 9090 端口。
 - 日志里出现“真实预览窗口引出帧回调”、“格式=RAW”、“YUYV RAW将转JPEG”或“来源=YUYV->NV21”：说明这一路 YUYV 正在用真实 Surface 驱动底层出帧，同时由覆盖层遮挡原生绿屏，并由 Java 尝试把 RAW YUYV 转成 JPEG 给格子显示、拉流和截图使用。
 - 日志里出现“自动重试”：说明某一路打开后持续无帧，App 已主动重开；如果其它 MJPEG 和 YUYV 都无帧，优先怀疑该路第三方 UVC 访问受限或驱动兼容问题；如果 YUYV 有帧且 JPEG 帧增长，说明 MJPEG 通道不兼容但 YUYV 兜底已可用于 HTTP 拉流。
 - `/cameras` 会返回每路 `openSequence`、`fpsMin`、`fpsMax`、`fpsFallback`、`bandwidthFactor`、`lowBandwidthMode`、`selectionReason`、`lastFrameAgeMs`、`lastFrameBytes` 和 `diagnosis`，可以远程判断失败是否总是发生在最后打开的一路、是否已进入强低带宽策略、是否底层根本没有帧回调。

@@ -125,6 +125,11 @@ public final class MainActivity extends Activity {
     private static final int CAMERA_PERMISSION_REQUEST = 4102;
     private static final int CAMERA2_TARGET_MIN_FPS = 10;
     private static final int CAMERA2_TARGET_MAX_FPS = 15;
+    private static final boolean PUSH_ENABLED_BY_DEFAULT = true;
+    private static final String DEFAULT_PUSH_TARGET_URL = "ws://192.168.112.194:9090/";
+    private static final int DEFAULT_PUSH_SLOT_COUNT = 4;
+    private static final int DEFAULT_PUSH_INTERVAL_MS = 500;
+    private static final int MIN_PUSH_INTERVAL_MS = 200;
     private static final int PRIMARY_SLOT_LOG_COLOR = Color.rgb(255, 230, 0);
     private static final float BANDWIDTH_FACTOR = 0.20f;
     private static final float RETRY_BANDWIDTH_FACTOR = 0.10f;
@@ -138,6 +143,7 @@ public final class MainActivity extends Activity {
 
     private USBMonitor mUSBMonitor;
     private CameraStreamHub mStreamHub;
+    private CameraPushClient mPushClient;
     private CameraManager mCamera2Manager;
     private CameraSlot[] mSlots;
     private TextView mStatusText;
@@ -164,6 +170,10 @@ public final class MainActivity extends Activity {
     private boolean mPromoteHealthyFirstSlot;
     private boolean mFirstSlotPromotionScheduled;
     private boolean mUseCamera2;
+    private boolean mPushEnabled;
+    private String mPushTargetUrl;
+    private int mPushSlotCount;
+    private int mPushIntervalMs;
     private int mFirstSlotSkipCount;
     private String mFirstSlotDeviceFilter;
 
@@ -178,6 +188,7 @@ public final class MainActivity extends Activity {
                 addLog(message);
             }
         });
+        configurePushClient();
         mUseCamera2 = getIntent() == null
             || getIntent().getBooleanExtra("use_camera2",
                 getIntent().getBooleanExtra("camera2_mode", USE_CAMERA2_BY_DEFAULT));
@@ -220,6 +231,12 @@ public final class MainActivity extends Activity {
         if (mFirstSlotDeviceFilter != null) {
             addLog("ADB调试：第1路只匹配USB设备：" + mFirstSlotDeviceFilter);
         }
+        if (mPushClient != null) {
+            addLog("WebSocket主动推流已启用：目标=" + mPushClient.getTargetUrl()
+                + "，路数=" + mPushSlotCount + "，间隔=" + mPushIntervalMs + "ms");
+        } else {
+            addLog("WebSocket主动推流已关闭：可通过ADB extra push_enabled=true 启用");
+        }
         if (mUseCamera2) {
             addLog("Camera2模式：预览尺寸按官方代码固定为 "
                 + TARGET_WIDTH + "x" + TARGET_HEIGHT
@@ -256,6 +273,9 @@ public final class MainActivity extends Activity {
         if (mStreamHub != null) {
             mStreamHub.start();
         }
+        if (mPushClient != null) {
+            mPushClient.start();
+        }
         updateServerInfo();
         addLog(mUseCamera2 ? "Camera2扫描已启动" : "USB监听已启动");
         mUiHandler.postDelayed(mScanRunnable, 800);
@@ -268,6 +288,9 @@ public final class MainActivity extends Activity {
         mUiHandler.removeCallbacks(mFpsRunnable);
         mUiHandler.removeCallbacks(mPermissionRequestRunnable);
         mPermissionRequestScheduled = false;
+        if (mPushClient != null) {
+            mPushClient.stop();
+        }
         closeAllCameras();
         if (mStreamHub != null) {
             mStreamHub.stop();
@@ -280,6 +303,10 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (mPushClient != null) {
+            mPushClient.stop();
+            mPushClient = null;
+        }
         if (mStreamHub != null) {
             mStreamHub.stop();
             mStreamHub = null;
@@ -305,6 +332,50 @@ public final class MainActivity extends Activity {
         if (value == null) return null;
         final String trimmed = value.trim();
         return trimmed.length() > 0 ? trimmed : null;
+    }
+
+    private void configurePushClient() {
+        mPushEnabled = getIntent() == null
+            || getIntent().getBooleanExtra("push_enabled",
+                getIntent().getBooleanExtra("enable_push", PUSH_ENABLED_BY_DEFAULT));
+        mPushTargetUrl = resolvePushTargetUrl();
+        mPushSlotCount = Math.max(1, Math.min(readIntExtra("push_slot_count",
+            DEFAULT_PUSH_SLOT_COUNT), MAX_CAMERAS));
+        mPushIntervalMs = Math.max(MIN_PUSH_INTERVAL_MS,
+            readIntExtra("push_interval_ms", DEFAULT_PUSH_INTERVAL_MS));
+        if (!mPushEnabled) {
+            mPushClient = null;
+            return;
+        }
+        mPushClient = new CameraPushClient(mPushTargetUrl, mPushSlotCount, mPushIntervalMs,
+            new CameraPushClient.FrameSource() {
+                @Override
+                public CameraPushClient.JpegFrame getLatestJpegFrame(final int slotIndex) {
+                    final CameraStreamHub streamHub = mStreamHub;
+                    return streamHub != null ? streamHub.getLatestJpegFrame(slotIndex) : null;
+                }
+            }, new CameraPushClient.LogSink() {
+                @Override
+                public void log(final String message) {
+                    addLog(message);
+                }
+            });
+    }
+
+    private String resolvePushTargetUrl() {
+        if (getIntent() == null) return DEFAULT_PUSH_TARGET_URL;
+        String targetUrl = trimToNull(getIntent().getStringExtra("push_target_url"));
+        if (targetUrl == null) {
+            targetUrl = trimToNull(getIntent().getStringExtra("push_url"));
+        }
+        if (targetUrl == null) {
+            targetUrl = trimToNull(getIntent().getStringExtra("push_target"));
+        }
+        return targetUrl != null ? targetUrl : DEFAULT_PUSH_TARGET_URL;
+    }
+
+    private int readIntExtra(final String extraName, final int defaultValue) {
+        return getIntent() != null ? getIntent().getIntExtra(extraName, defaultValue) : defaultValue;
     }
 
     private View createContentView() {

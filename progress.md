@@ -442,6 +442,27 @@
 - `docs/eight-camera-probe.md`: documented Camera2/HAL runtime behavior and field verification signals.
 - `progress.md`: appended this implementation record.
 - Rollback: revert commit `v0.1.0-beta.24` to return to the previous beta23 USB/libuvc-first behavior, or launch with Camera2 disabled via ADB extra to use the older path.
+
+## 2026-07-02 - Task: Add active WebSocket camera push
+
+### What was done
+- Added an active WebSocket push client that connects to `ws://192.168.112.194:9090/` and pushes the latest JPEG frames for slots 0-3 through one long-lived connection.
+- Reused the existing JPEG cache from the HTTP streaming hub so the previous `/stream/N.mjpeg` pull endpoints remain available as a fallback verification path.
+- Added a compact binary frame format with a `KJPG` header, slot index, timestamp, sequence number, frame size, and JPEG payload for the receiver to separate four camera routes.
+- Added ADB-configurable push settings for enablement, target URL, slot count, and push interval while keeping 4 routes and 500 ms per route as the default.
+- Updated field documentation to explain the WebSocket push target, receiver expectations, and logs to check onsite.
+
+### Testing
+- Ran `./gradlew :app:assembleDebug` successfully.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraPushClient.java`: added a dependency-free WebSocket client with handshake, masked binary frames, reconnect loop, and per-slot push counters.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java`: exposes snapshot copies of the latest per-slot JPEG frame, timestamp, width, and height for the push client.
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: configures and starts/stops the WebSocket push client with the activity lifecycle.
+- `README.md`: documented the default WebSocket push behavior and onsite troubleshooting logs.
+- `docs/eight-camera-probe.md`: documented receiver-side parsing expectations for the active push path.
+- `progress.md`: appended this implementation record.
+- Rollback: revert this task's commit to remove active WebSocket pushing while preserving the existing HTTP pull stream behavior.
 ## 2026-07-02 - Task: Add Camera2 official-compatible stable preview release
 
 ### What was done

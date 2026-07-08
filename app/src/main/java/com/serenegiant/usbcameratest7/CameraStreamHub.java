@@ -117,6 +117,19 @@ final class CameraStreamHub {
         return mSlots[slotIndex].latestJpegData;
     }
 
+    CameraPushClient.JpegFrame getLatestJpegFrame(final int slotIndex) {
+        if (!isValidSlot(slotIndex)) return null;
+        final SlotState slot = mSlots[slotIndex];
+        final byte[] jpegData = slot.latestJpegData;
+        if (jpegData == null || jpegData.length == 0 || slot.latestJpegTimestampMs <= 0) {
+            return null;
+        }
+        final byte[] jpegCopy = new byte[jpegData.length];
+        System.arraycopy(jpegData, 0, jpegCopy, 0, jpegData.length);
+        return new CameraPushClient.JpegFrame(slotIndex, jpegCopy, slot.latestJpegTimestampMs,
+            slot.width, slot.height);
+    }
+
     void onSurfaceJpegFrame(final int slotIndex, final byte[] jpeg, final int width,
         final int height) {
         if (!isValidSlot(slotIndex) || jpeg == null || jpeg.length == 0) return;
