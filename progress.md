@@ -560,3 +560,59 @@
 - `README.md`: added `v0.2.0-beta.1` prerelease links and changed installation examples to the Beta APK.
 - `progress.md`: appended this release-preparation record.
 - Rollback: revert the release-preparation changes in the three files above; if already published, also delete the `v0.2.0-beta.1` GitHub Release and tag only with explicit approval.
+
+## 2026-07-15 - Task: Add boot auto-start for camera streaming
+
+### What was done
+- Added a standard Android boot receiver that restores the existing Camera2 foreground streaming service after `BOOT_COMPLETED` without opening the Activity.
+- Limited auto-start to Android 5.0 or newer devices that already have CAMERA permission, with clear Logcat reasons when startup is skipped or fails.
+- Kept manual `关闭全部` behavior limited to the current run so the next normal device boot restores Camera2, HTTP, and WebSocket streaming again.
+- Documented first-run permission prerequisites, force-stop and firmware limitations, and real-reboot field verification steps.
+
+### Testing
+- Ran `./gradlew :app:lintDebug :app:assembleDebug` successfully.
+- Ran `git diff --check` successfully.
+- Read IDE diagnostics for the receiver and manifest; no diagnostics were reported.
+- Inspected the packaged debug manifest and confirmed it contains `RECEIVE_BOOT_COMPLETED`, `BootCompletedReceiver`, and the `BOOT_COMPLETED` intent filter.
+- A real robot reboot was not available locally; the documented `adb reboot` flow remains the required onsite verification for actual broadcast delivery and camera recovery.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/BootCompletedReceiver.java`: added guarded boot handling and API-appropriate foreground-service startup.
+- `app/src/main/AndroidManifest.xml`: added the boot-completed permission and receiver registration.
+- `README.md`: documented boot auto-start behavior, prerequisites, limitations, logs, and ADB reboot checks.
+- `docs/eight-camera-probe.md`: added boot startup behavior and field-verification guidance to the probe documentation.
+- `progress.md`: appended this implementation and verification record.
+- `.trellis/tasks/07-15-boot-camera-streaming/prd.md`: captured the agreed boot-start scope and acceptance criteria.
+- `.trellis/tasks/07-15-boot-camera-streaming/implement.jsonl`: recorded implementation guidance for service reuse and cross-layer flow.
+- `.trellis/tasks/07-15-boot-camera-streaming/check.jsonl`: recorded verification guidance for manifest-to-service consistency.
+- `.trellis/tasks/07-15-boot-camera-streaming/task.json`: recorded the active task status and scope.
+- Rollback point: restore the tracked implementation and documentation files from commit `a117bf6`, then remove `BootCompletedReceiver.java`; retain this progress entry as historical evidence of the rolled-back task.
+
+## 2026-07-15 - Task: Align background Camera2 with official SurfaceTexture path
+
+### What was done
+- Replaced the background service's JPEG `ImageReader` Camera2 target with the same fixed 640x480 `SurfaceTexture` and single-Surface `TEMPLATE_PREVIEW` request used by Keenon's official `CurrencyCameraActivity`.
+- Limited the production Camera2 path to the first four camera IDs in `cameraIdList` order while retaining the separate eight-slot UVC diagnosis limit.
+- Removed JPEG output-size enumeration and fallback selection, eliminating the path that selected 1920x1080 for one camera and left WebSocket without a usable frame.
+- Added service-owned EGL readback of the official SurfaceTexture frames so HTTP MJPEG and the existing KJPG WebSocket client continue receiving 640x480 JPEGs without adding a second Camera2 output target.
+- Added deterministic cleanup for the camera Surface, SurfaceTexture, external texture, EGL surface/context, and readback bitmap during close, reconnect, and service shutdown.
+
+### Testing
+- Ran `./gradlew :app:compileDebugJavaWithJavac` successfully.
+- Ran `./gradlew :app:lintDebug` successfully after declaring the API 21 boundary for the Camera2 SurfaceTexture reader.
+- Ran final `./gradlew :app:lintDebug :app:assembleDebug --console=plain` successfully and produced the debug APK.
+- Ran `git diff --check` successfully during implementation.
+- Read IDE diagnostics for the service and SurfaceTexture reader; no diagnostics were reported.
+- Searched the production background service and confirmed it no longer references `ImageReader`, JPEG output sizes, `chooseJpegSize`, or the previous Camera2 FPS override.
+- Real robot verification is still required to confirm all four SurfaceTexture callbacks, KJPG dimensions, HTTP counters, and WebSocket sequence counters.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraSurfaceFrameReader.java`: added fixed-size SurfaceTexture creation, frame draining, EGL external-texture rendering, 640x480 JPEG readback, and complete resource cleanup.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamingService.java`: now opens at most four official Camera2 slots with one 640x480 Surface target each and forwards readback JPEGs to the existing stream hub.
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: now requests four Camera2 service slots instead of reusing the eight-camera UVC maximum.
+- `.github/workflows/release.yml`: updated future release notes to describe the official SurfaceTexture repair and removal of the 1920x1080 JPEG fallback.
+- `README.md`: documented the exact official Camera2 request contract and four-route 640x480 KJPG verification.
+- `docs/eight-camera-probe.md`: corrected the previous ImageReader description and added field logs and dimensions for the repaired path.
+- `progress.md`: appended this implementation and verification record.
+- `.trellis/tasks/07-15-official-camera-surface/`: captured the approved official SurfaceTexture scope and implementation/check guidance.
+- Rollback point: restore the tracked implementation and documentation files from commit `a117bf6`, then remove `BootCompletedReceiver.java` and `CameraSurfaceFrameReader.java`; retain this progress entry as historical evidence if the task is rolled back.

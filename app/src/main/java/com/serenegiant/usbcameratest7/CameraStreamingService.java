@@ -10,27 +10,19 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.graphics.ImageFormat;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
-import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
-import android.hardware.camera2.params.StreamConfigurationMap;
-import android.media.Image;
-import android.media.ImageReader;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.util.Log;
-import android.util.Range;
-import android.util.Size;
 import android.view.Surface;
 
-import java.nio.ByteBuffer;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -59,20 +51,18 @@ public final class CameraStreamingService extends Service {
     private static final String NOTIFICATION_CHANNEL_ID = "keenon_camera_streaming";
     private static final String NOTIFICATION_CHANNEL_NAME = "摄像头持续推流";
     private static final int NOTIFICATION_ID = 9201;
-    private static final int MAX_CAMERA_SLOTS = 8;
-    private static final int DEFAULT_CAMERA_SLOT_COUNT = 8;
+    private static final int MAX_CAMERA_SLOTS = 4;
+    private static final int DEFAULT_CAMERA_SLOT_COUNT = 4;
     private static final int STREAM_PORT = 8080;
     private static final int TARGET_WIDTH = 640;
     private static final int TARGET_HEIGHT = 480;
-    private static final int CAMERA2_TARGET_MIN_FPS = 10;
-    private static final int CAMERA2_TARGET_MAX_FPS = 15;
     private static final String DEFAULT_PUSH_TARGET_URL = "ws://192.168.112.194:9090/";
     private static final int DEFAULT_PUSH_SLOT_COUNT = 4;
     private static final int DEFAULT_PUSH_INTERVAL_MS = 500;
     private static final int MIN_PUSH_INTERVAL_MS = 200;
     private static final int MAX_LOG_LINES = 220;
     private static final int CAMERA_RECONNECT_DELAY_MS = 1500;
-    private static final byte JPEG_QUALITY = 60;
+    private static final int SURFACE_READBACK_JPEG_QUALITY = 60;
 
     private final LocalBinder mBinder = new LocalBinder();
     private final Object mLifecycleLock = new Object();
@@ -83,6 +73,7 @@ public final class CameraStreamingService extends Service {
     private HandlerThread mCameraThread;
     private Handler mCameraHandler;
     private CameraManager mCameraManager;
+    private CameraSurfaceFrameReader mSurfaceFrameReader;
     private CameraStreamHub mStreamHub;
     private CameraPushClient mPushClient;
     private volatile boolean mStreamingStarted;
@@ -385,20 +376,56 @@ public final class CameraStreamingService extends Service {
         slot.status = "OPENING";
         slot.resetFrameMetrics();
         try {
-            final Size jpegSize = chooseJpegSize(cameraId);
-            slot.width = jpegSize.getWidth();
-            slot.height = jpegSize.getHeight();
-            final ImageReader imageReader = ImageReader.newInstance(slot.width, slot.height,
-                ImageFormat.JPEG, 2);
-            slot.imageReader = imageReader;
-            imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
+            slot.width = TARGET_WIDTH;
+            slot.height = TARGET_HEIGHT;
+            final CameraSurfaceFrameReader surfaceFrameReader = getOrCreateSurfaceFrameReader();
+            final CameraSurfaceFrameReader.FrameTarget frameTarget =
+                surfaceFrameReader.createTarget(slot.slotIndex,
+                    new CameraSurfaceFrameReader.FrameListener() {
                 @Override
-                public void onImageAvailable(final ImageReader callbackImageReader) {
-                    handleImageAvailable(slot, callbackImageReader, openGeneration);
+                public int getCaptureIntervalMs() {
+                    return mPushIntervalMs;
                 }
-            }, mCameraHandler);
+
+                @Override
+                public void onFrameAvailable(final long timestampMs) {
+                    if (!isCurrentGeneration(slot, cameraId, openGeneration)) return;
+                    slot.recordFrame(timestampMs);
+                    if (slot.frameCount == 1) {
+                        log("Camera2后台：第" + (slot.slotIndex + 1)
+                            + "路官方640x480 Surface首帧已到达");
+                    }
+                }
+
+                @Override
+                public void onJpegFrame(final byte[] jpegData, final int width,
+                    final int height, final long timestampMs) {
+                    if (!isCurrentGeneration(slot, cameraId, openGeneration)) return;
+                    final CameraStreamHub streamHub = mStreamHub;
+                    if (streamHub != null) {
+                        streamHub.onCamera2JpegFrame(slot.slotIndex, jpegData, width, height);
+                    }
+                    slot.jpegFrameCount++;
+                    if (slot.jpegFrameCount == 1) {
+                        log("Camera2后台：第" + (slot.slotIndex + 1)
+                            + "路官方640x480 Surface首帧JPEG已生成，大小="
+                            + jpegData.length + "字节");
+                    }
+                }
+
+                @Override
+                public void onReadbackError(final String message, final Throwable throwable) {
+                    if (!isCurrentGeneration(slot, cameraId, openGeneration)) return;
+                    final long now = System.currentTimeMillis();
+                    if (now - slot.lastReadbackErrorLogMs < 5000) return;
+                    slot.lastReadbackErrorLogMs = now;
+                    Log.e(TAG, message, throwable);
+                    log(message + "：" + throwable.getMessage());
+                }
+            });
+            slot.frameTarget = frameTarget;
             log("Camera2后台：准备打开第" + (slot.slotIndex + 1) + "路，cameraId="
-                + cameraId + "，JPEG=" + slot.width + "x" + slot.height);
+                + cameraId + "，官方SurfaceTexture=" + TARGET_WIDTH + "x" + TARGET_HEIGHT);
             mCameraManager.openCamera(cameraId, new CameraDevice.StateCallback() {
                 @Override
                 public void onOpened(final CameraDevice cameraDevice) {
@@ -410,7 +437,7 @@ public final class CameraStreamingService extends Service {
                     slot.status = "OPEN";
                     log("Camera2后台：第" + (slot.slotIndex + 1)
                         + "路open成功，cameraId=" + cameraId);
-                    createCaptureSession(slot, cameraDevice, imageReader, openGeneration);
+                    createCaptureSession(slot, cameraDevice, frameTarget, openGeneration);
                 }
 
                 @Override
@@ -436,7 +463,7 @@ public final class CameraStreamingService extends Service {
                     closeCameraSlot(slot, "OPEN FAILED: Camera2 error=" + error);
                     scheduleCameraReconcile(CAMERA_RECONNECT_DELAY_MS);
                 }
-            }, mCameraHandler);
+            }, null);
         } catch (final SecurityException securityException) {
             log("Camera2后台：第" + (slot.slotIndex + 1) + "路打开失败，无Camera权限");
             closeCameraSlot(slot, "OPEN FAILED: 无Camera权限");
@@ -448,6 +475,18 @@ public final class CameraStreamingService extends Service {
         }
     }
 
+    private CameraSurfaceFrameReader getOrCreateSurfaceFrameReader() {
+        if (mSurfaceFrameReader == null) {
+            if (mCameraHandler == null) {
+                throw new IllegalStateException("Camera线程未启动");
+            }
+            mSurfaceFrameReader = new CameraSurfaceFrameReader(TARGET_WIDTH, TARGET_HEIGHT,
+                SURFACE_READBACK_JPEG_QUALITY, mCameraHandler);
+            log("Camera2后台：官方640x480 SurfaceTexture离屏读回已初始化");
+        }
+        return mSurfaceFrameReader;
+    }
+
     private boolean isCurrentGeneration(final CameraSlotState slot, final String cameraId,
         final long openGeneration) {
         return mStreamingStarted && slot.openGeneration == openGeneration
@@ -455,21 +494,26 @@ public final class CameraStreamingService extends Service {
     }
 
     private void createCaptureSession(final CameraSlotState slot,
-        final CameraDevice cameraDevice, final ImageReader imageReader,
+        final CameraDevice cameraDevice,
+        final CameraSurfaceFrameReader.FrameTarget frameTarget,
         final long openGeneration) {
-        if (imageReader == null || slot.imageReader != imageReader) {
-            closeCameraSlot(slot, "OPEN FAILED: ImageReader为空");
+        if (frameTarget == null || slot.frameTarget != frameTarget) {
+            closeCameraSlot(slot, "OPEN FAILED: 官方预览Surface为空");
             return;
         }
-        final Surface jpegSurface = imageReader.getSurface();
+        final Surface previewSurface = frameTarget.getSurface();
+        if (previewSurface == null || !previewSurface.isValid()) {
+            closeCameraSlot(slot, "OPEN FAILED: 官方预览Surface无效");
+            return;
+        }
         try {
-            cameraDevice.createCaptureSession(Arrays.asList(jpegSurface),
+            cameraDevice.createCaptureSession(Arrays.asList(previewSurface),
                 new CameraCaptureSession.StateCallback() {
                     @Override
                     public void onConfigured(final CameraCaptureSession session) {
                         if (!mStreamingStarted || slot.openGeneration != openGeneration
                             || slot.cameraDevice != cameraDevice
-                            || slot.imageReader != imageReader) {
+                            || slot.frameTarget != frameTarget) {
                             session.close();
                             return;
                         }
@@ -477,27 +521,21 @@ public final class CameraStreamingService extends Service {
                         try {
                             final CaptureRequest.Builder requestBuilder =
                                 cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
-                            requestBuilder.addTarget(jpegSurface);
-                            final Range<Integer> fpsRange = chooseFpsRange(slot.cameraId);
-                            if (fpsRange != null) {
-                                requestBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                                    fpsRange);
-                            }
-                            requestBuilder.set(CaptureRequest.JPEG_QUALITY, JPEG_QUALITY);
-                            session.setRepeatingRequest(requestBuilder.build(), null,
-                                mCameraHandler);
+                            requestBuilder.addTarget(previewSurface);
+                            session.setRepeatingRequest(requestBuilder.build(), null, null);
                             slot.status = "STREAMING";
                             slot.lastFpsTimestampMs = System.currentTimeMillis();
                             if (mStreamHub != null) {
                                 mStreamHub.onSlotOpened(slot.slotIndex,
                                     "Camera2 id=" + slot.cameraId, slot.width, slot.height,
-                                    "Camera2JPEG", slot.slotIndex + 1, 0, 0, false, 0f,
-                                    "前台服务ImageReader后台采集", false);
+                                    "Camera2SurfaceTexture", slot.slotIndex + 1,
+                                    0, 0, false, 0f,
+                                    "官方SurfaceTexture 640x480后台采集", false);
                             }
                             log("Camera2后台：第" + (slot.slotIndex + 1)
-                                + "路采集已启动，cameraId=" + slot.cameraId
-                                + "，尺寸=" + slot.width + "x" + slot.height
-                                + "，fpsRange=" + formatFpsRange(fpsRange));
+                                + "路官方调用已启动，cameraId=" + slot.cameraId
+                                + "，SurfaceTexture=" + TARGET_WIDTH + "x" + TARGET_HEIGHT
+                                + "，request=TEMPLATE_PREVIEW，target=单Surface");
                         } catch (final Exception exception) {
                             log("Camera2后台：第" + (slot.slotIndex + 1)
                                 + "路启动采集失败：" + exception.getMessage());
@@ -516,114 +554,17 @@ public final class CameraStreamingService extends Service {
                             "OPEN FAILED: Camera2 session configure failed");
                         scheduleCameraReconcile(CAMERA_RECONNECT_DELAY_MS);
                     }
-                }, mCameraHandler);
+                }, null);
         } catch (final CameraAccessException cameraAccessException) {
             log("Camera2后台：第" + (slot.slotIndex + 1)
                 + "路创建Session失败：" + cameraAccessException.getMessage());
             closeCameraSlot(slot, "OPEN FAILED: " + cameraAccessException.getMessage());
             scheduleCameraReconcile(CAMERA_RECONNECT_DELAY_MS);
-        }
-    }
-
-    private void handleImageAvailable(final CameraSlotState slot,
-        final ImageReader imageReader, final long openGeneration) {
-        Image image = null;
-        try {
-            image = imageReader.acquireLatestImage();
-            if (image == null) return;
-            if (!mStreamingStarted || slot.openGeneration != openGeneration
-                || slot.imageReader != imageReader) {
-                return;
-            }
-            final Image.Plane[] planes = image.getPlanes();
-            if (planes == null || planes.length == 0) return;
-            final ByteBuffer jpegBuffer = planes[0].getBuffer();
-            final byte[] jpegData = new byte[jpegBuffer.remaining()];
-            jpegBuffer.get(jpegData);
-            final long now = System.currentTimeMillis();
-            slot.recordFrame(now);
-            final CameraStreamHub streamHub = mStreamHub;
-            if (streamHub != null) {
-                streamHub.onCamera2JpegFrame(slot.slotIndex, jpegData, slot.width, slot.height);
-            }
-            if (slot.frameCount == 1) {
-                log("Camera2后台：第" + (slot.slotIndex + 1)
-                    + "路首帧JPEG已到达，大小=" + jpegData.length + "字节");
-            }
-        } catch (final Exception exception) {
+        } catch (final RuntimeException runtimeException) {
             log("Camera2后台：第" + (slot.slotIndex + 1)
-                + "路读取JPEG失败：" + exception.getMessage());
-        } finally {
-            if (image != null) {
-                image.close();
-            }
-        }
-    }
-
-    private Size chooseJpegSize(final String cameraId) throws CameraAccessException {
-        final CameraCharacteristics characteristics =
-            mCameraManager.getCameraCharacteristics(cameraId);
-        final StreamConfigurationMap configurationMap = characteristics.get(
-            CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-        final Size[] jpegSizes = configurationMap != null
-            ? configurationMap.getOutputSizes(ImageFormat.JPEG) : null;
-        if (jpegSizes == null || jpegSizes.length == 0) {
-            throw new IllegalStateException("cameraId=" + cameraId + "未上报JPEG输出尺寸");
-        }
-
-        Size closestSize = jpegSizes[0];
-        long closestScore = Long.MAX_VALUE;
-        for (final Size candidateSize : jpegSizes) {
-            if (candidateSize.getWidth() == TARGET_WIDTH
-                && candidateSize.getHeight() == TARGET_HEIGHT) {
-                return candidateSize;
-            }
-            final long widthDifference = Math.abs(candidateSize.getWidth() - TARGET_WIDTH);
-            final long heightDifference = Math.abs(candidateSize.getHeight() - TARGET_HEIGHT);
-            final long oversizedPenalty = candidateSize.getWidth() > TARGET_WIDTH
-                || candidateSize.getHeight() > TARGET_HEIGHT ? 1000000L : 0L;
-            final long score = oversizedPenalty + widthDifference * 10L + heightDifference * 10L;
-            if (score < closestScore) {
-                closestScore = score;
-                closestSize = candidateSize;
-            }
-        }
-        return closestSize;
-    }
-
-    private Range<Integer> chooseFpsRange(final String cameraId) {
-        if (cameraId == null || mCameraManager == null) return null;
-        try {
-            final CameraCharacteristics characteristics =
-                mCameraManager.getCameraCharacteristics(cameraId);
-            final Range<Integer>[] availableRanges = characteristics.get(
-                CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
-            if (availableRanges == null || availableRanges.length == 0) return null;
-
-            Range<Integer> bestRange = null;
-            int bestScore = Integer.MAX_VALUE;
-            for (final Range<Integer> availableRange : availableRanges) {
-                if (availableRange == null) continue;
-                final int lower = availableRange.getLower();
-                final int upper = availableRange.getUpper();
-                int score = Math.abs(upper - CAMERA2_TARGET_MAX_FPS) * 20
-                    + Math.abs(lower - CAMERA2_TARGET_MIN_FPS) * 5;
-                if (upper >= CAMERA2_TARGET_MIN_FPS && upper <= CAMERA2_TARGET_MAX_FPS) {
-                    score -= 1000;
-                }
-                if (upper > CAMERA2_TARGET_MAX_FPS) {
-                    score += (upper - CAMERA2_TARGET_MAX_FPS) * 30;
-                }
-                if (score < bestScore) {
-                    bestScore = score;
-                    bestRange = availableRange;
-                }
-            }
-            return bestRange;
-        } catch (final Exception exception) {
-            log("Camera2后台：读取cameraId=" + cameraId
-                + " fpsRange失败：" + exception.getMessage());
-            return null;
+                + "路创建官方Session异常：" + runtimeException.getMessage());
+            closeCameraSlot(slot, "OPEN FAILED: " + runtimeException.getMessage());
+            scheduleCameraReconcile(CAMERA_RECONNECT_DELAY_MS);
         }
     }
 
@@ -654,10 +595,10 @@ public final class CameraStreamingService extends Service {
         slot.openGeneration++;
         final CameraCaptureSession captureSession = slot.captureSession;
         final CameraDevice cameraDevice = slot.cameraDevice;
-        final ImageReader imageReader = slot.imageReader;
+        final CameraSurfaceFrameReader.FrameTarget frameTarget = slot.frameTarget;
         slot.captureSession = null;
         slot.cameraDevice = null;
-        slot.imageReader = null;
+        slot.frameTarget = null;
         slot.cameraId = null;
         slot.status = finalStatus;
 
@@ -675,9 +616,8 @@ public final class CameraStreamingService extends Service {
         if (cameraDevice != null) {
             cameraDevice.close();
         }
-        if (imageReader != null) {
-            imageReader.setOnImageAvailableListener(null, null);
-            imageReader.close();
+        if (frameTarget != null) {
+            frameTarget.release();
         }
         final CameraStreamHub streamHub = mStreamHub;
         if (streamHub != null) {
@@ -688,8 +628,7 @@ public final class CameraStreamingService extends Service {
     private void closeCameraResourcesOnCameraThread() {
         final Handler cameraHandler = mCameraHandler;
         if (cameraHandler == null || Thread.currentThread() == mCameraThread) {
-            unregisterAvailabilityCallback();
-            closeAllCameraSlots();
+            closeCameraResourcesNow();
             return;
         }
 
@@ -699,8 +638,7 @@ public final class CameraStreamingService extends Service {
             @Override
             public void run() {
                 try {
-                    unregisterAvailabilityCallback();
-                    closeAllCameraSlots();
+                    closeCameraResourcesNow();
                 } finally {
                     closeLatch.countDown();
                 }
@@ -712,6 +650,15 @@ public final class CameraStreamingService extends Service {
             }
         } catch (final InterruptedException interruptedException) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    private void closeCameraResourcesNow() {
+        unregisterAvailabilityCallback();
+        closeAllCameraSlots();
+        if (mSurfaceFrameReader != null) {
+            mSurfaceFrameReader.release();
+            mSurfaceFrameReader = null;
         }
     }
 
@@ -829,23 +776,20 @@ public final class CameraStreamingService extends Service {
         return normalizedValue.length() > 0 ? normalizedValue : fallbackValue;
     }
 
-    private String formatFpsRange(final Range<Integer> fpsRange) {
-        return fpsRange == null ? "系统默认"
-            : fpsRange.getLower() + "-" + fpsRange.getUpper();
-    }
-
     private static final class CameraSlotState {
         final int slotIndex;
         volatile String cameraId;
         volatile String status = "EMPTY";
         volatile CameraDevice cameraDevice;
         volatile CameraCaptureSession captureSession;
-        volatile ImageReader imageReader;
+        volatile CameraSurfaceFrameReader.FrameTarget frameTarget;
         volatile long frameCount;
+        volatile long jpegFrameCount;
         volatile int width;
         volatile int height;
         volatile float fps;
         volatile long openGeneration;
+        long lastReadbackErrorLogMs;
         long lastFpsFrameCount;
         long lastFpsTimestampMs;
 
@@ -855,7 +799,9 @@ public final class CameraStreamingService extends Service {
 
         void resetFrameMetrics() {
             frameCount = 0;
+            jpegFrameCount = 0;
             fps = 0f;
+            lastReadbackErrorLogMs = 0;
             lastFpsFrameCount = 0;
             lastFpsTimestampMs = System.currentTimeMillis();
         }

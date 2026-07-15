@@ -99,6 +99,7 @@ public final class MainActivity extends Activity {
     private static final String TAG = "KeenonUvcProbe";
 
     private static final int MAX_CAMERAS = 8;
+    private static final int OFFICIAL_CAMERA2_SLOT_COUNT = 4;
     private static final int GRID_COLUMNS = 2;
     private static final int TARGET_WIDTH = 640;
     private static final int TARGET_HEIGHT = 480;
@@ -282,7 +283,7 @@ public final class MainActivity extends Activity {
             addLog("WebSocket主动推流已关闭：可通过ADB extra push_enabled=true 启用");
         }
         if (mUseCamera2) {
-            addLog("Camera2模式：前台服务使用ImageReader生成JPEG，Activity切到后台后继续推流");
+            addLog("Camera2模式：前台服务使用官方640x480 SurfaceTexture生成JPEG，Activity切到后台后继续推流");
         } else if (mDisableFirstSlotYuyv) {
             addLog("ADB调试：第1路YUYV兜底已关闭，本次第1路只探测MJPEG");
         } else {
@@ -440,7 +441,7 @@ public final class MainActivity extends Activity {
         final Intent serviceIntent = new Intent(this, CameraStreamingService.class);
         serviceIntent.setAction(CameraStreamingService.ACTION_START);
         serviceIntent.putExtra(CameraStreamingService.EXTRA_CAMERA_SLOT_COUNT,
-            mFirstSlotOnlyMode ? 1 : MAX_CAMERAS);
+            mFirstSlotOnlyMode ? 1 : OFFICIAL_CAMERA2_SLOT_COUNT);
         serviceIntent.putExtra(CameraStreamingService.EXTRA_PUSH_ENABLED, mPushEnabled);
         serviceIntent.putExtra(CameraStreamingService.EXTRA_PUSH_TARGET_URL, mPushTargetUrl);
         serviceIntent.putExtra(CameraStreamingService.EXTRA_PUSH_SLOT_COUNT, mPushSlotCount);
@@ -2200,7 +2201,7 @@ public final class MainActivity extends Activity {
                 snapshot.width > 0 ? snapshot.width : TARGET_WIDTH,
                 snapshot.height > 0 ? snapshot.height : TARGET_HEIGHT,
                 UVCCamera.FRAME_FORMAT_MJPEG);
-            previewReason = "前台服务ImageReader后台采集";
+            previewReason = "前台服务官方SurfaceTexture后台采集";
             openStrategy = previewReason;
 
             final CameraPushClient.JpegFrame latestFrame = snapshot.latestFrame;

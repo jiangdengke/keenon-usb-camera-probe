@@ -148,7 +148,7 @@ final class CameraStreamHub {
 
     void onCamera2JpegFrame(final int slotIndex, final byte[] jpeg, final int width,
         final int height) {
-        onJpegFrame(slotIndex, jpeg, width, height, "Camera2->ImageReader->JPEG");
+        onJpegFrame(slotIndex, jpeg, width, height, "Camera2->SurfaceTexture->JPEG");
     }
 
     private void onJpegFrame(final int slotIndex, final byte[] jpeg, final int width,

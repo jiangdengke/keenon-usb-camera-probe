@@ -83,6 +83,9 @@ jobs:
         run: |
           cat > release/RELEASE_NOTES.md <<EOF
           ## 更新内容
+          - Camera2 采集严格对齐 Keenon 官方 CurrencyCameraActivity：按 cameraIdList 顺序打开前 4 路，每路固定一个 640x480 SurfaceTexture 和 TEMPLATE_PREVIEW 单 Surface 请求
+          - 移除后台 JPEG ImageReader 尺寸选择，避免某一路回退到 1920x1080 后无法产出 WebSocket 推流帧
+          - 通过固定 640x480 SurfaceTexture 离屏读回继续生成 HTTP 与 WebSocket 所需 JPEG，不改变 KJPG 协议和四路槽位映射
           - 新增 Android 前台服务，Camera2、JPEG 生成、HTTP 和 WebSocket 推流不再依赖 Activity 生命周期
           - App 切换到机器人主页面或其他 App 后继续推流，返回界面时只恢复状态展示，不重复打开摄像头或建立第二个连接
           - 新增摄像头可用性监听和自动重连，摄像头暂时不可用后可由后台服务重新扫描恢复

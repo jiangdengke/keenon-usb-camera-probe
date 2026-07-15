@@ -23,10 +23,10 @@
 ### 摄像头获取
 
 - 默认使用 Android Camera2/HAL 的 `cameraIdList` 打开摄像头。
-- 该路径对齐 Keenon 官方 `CurrencyCameraActivity` 示例，不再依赖直接 USB/libuvc 打开作为主路径。
+- Camera2 主链路严格对齐 Keenon 官方 `CurrencyCameraActivity`：按 `cameraIdList` 顺序最多打开前 4 路，每路执行 `SurfaceTexture.setDefaultBufferSize(640, 480)`，CaptureSession 只包含一个 Surface，并使用 `TEMPLATE_PREVIEW` 持续请求。
 - Camera2、JPEG 生成、HTTP 和 WebSocket 由 Android 前台服务持有，不依赖 Activity 的 `TextureView` 生命周期。
-- 服务优先选择 Camera2 上报的 `640x480` JPEG 输出；设备不支持时选择最接近的已上报 JPEG 尺寸。
-- 为降低现场闪屏，Camera2 预览会优先选择接近 `10-15fps` 的系统支持帧率范围。
+- 服务不再查询或选择 Camera2 JPEG 输出尺寸，因此不会因为某一路未上报 `640x480 JPEG` 而回退到 `1920x1080`。
+- 固定 `640x480` SurfaceTexture 产生画面后，服务通过离屏读回生成 JPEG，再交给原有 HTTP 和 WebSocket 推流链路；Camera2 Request 本身仍只有官方的单 Surface target。
 
 ### 后台持续运行
 
@@ -43,6 +43,29 @@
 点击 App 内“关闭全部”会明确停止前台服务并释放摄像头、HTTP 和 WebSocket 资源。
 
 限制：如果机器人主页面或其他软件也要打开同一组摄像头，Camera HAL 可能拒绝并发访问。前台服务只能解决 Activity 退到后台后被生命周期主动关闭的问题，不能让两个 App 同时独占同一摄像头。
+
+### 开机自动恢复
+
+App 安装后需要至少打开一次并授予 CAMERA 权限。此后机器人正常开机完成时，App 会在不打开界面的情况下自动启动 `CameraStreamingService`，恢复 Camera2、HTTP 和 WebSocket 推流。
+
+开机自启遵循以下边界：
+
+- 仅监听 Android 标准 `BOOT_COMPLETED` 广播，不依赖厂商私有开机广播。
+- Android 版本低于 5.0 或尚未授予 CAMERA 权限时不会启动推流，也不会在后台弹授权框。
+- App 内“关闭全部”只停止当前运行；下一次设备重启仍会自动恢复推流。
+- 用户在系统设置或 ADB 中强制停止 App 后，Android 可能暂停向该 App 投递开机广播；需要手动打开一次 App 才能解除停止状态。
+- 机器人固件仍可能通过自启动管理或省电策略拦截第三方开机广播，需要在目标机型上实测。
+
+现场验证建议执行真实重启：
+
+```bash
+adb reboot
+adb wait-for-device
+adb shell dumpsys activity services com.serenegiant.usbcameratest7
+adb shell logcat -d -s KeenonBootReceiver:I KeenonCameraService:I '*:S'
+```
+
+正常情况下无需启动 Activity，通知栏会出现“机器人摄像头推流运行中”，日志包含 `开机自启已触发`，WebSocket 四路序号与 HTTP `/cameras` 数据会重新增长。`BOOT_COMPLETED` 是系统受保护广播，普通非 root ADB 环境可能不允许手工伪造，因此应以真实重启结果为准。
 
 ### 主动 WebSocket 推流
 
@@ -223,10 +246,10 @@ WebSocket推流状态：目标=ws://192.168.112.194:9090/，累计=... S1=... S2
 ### 后台持续推流验证
 
 1. 启动 App 并确认出现“机器人摄像头推流运行中”通知。
-2. 确认 App 日志出现 `Camera2后台：第N路首帧JPEG已到达`。
+2. 确认四路日志都出现 `官方SurfaceTexture=640x480`、`官方调用已启动` 和 `官方640x480 Surface首帧JPEG已生成`。
 3. 在接收端记录 4 路 `sequence` 或接收帧数。
 4. 按 Home 或切换到机器人主页面，保持至少 30 秒。
-5. 确认接收端 4 路序号仍持续增长；同时可继续访问 `http://机器人IP:8080/cameras`。
+5. 确认接收端 4 路 KJPG 头的 `width=640`、`height=480` 且序号持续增长；同时可继续访问 `http://机器人IP:8080/cameras`。
 6. 返回本 App，确认没有重复 WebSocket 连接，状态仍显示“后台推流服务=运行中”。
 
 如需停止，返回本 App 点击“关闭全部”。强制停止应用、撤销 CAMERA 权限、设备重启，或其他 App 占用同一摄像头时，推流仍会停止。
