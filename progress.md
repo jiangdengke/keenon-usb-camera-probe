@@ -616,3 +616,20 @@
 - `progress.md`: appended this implementation and verification record.
 - `.trellis/tasks/07-15-official-camera-surface/`: captured the approved official SurfaceTexture scope and implementation/check guidance.
 - Rollback point: restore the tracked implementation and documentation files from commit `a117bf6`, then remove `BootCompletedReceiver.java` and `CameraSurfaceFrameReader.java`; retain this progress entry as historical evidence if the task is rolled back.
+
+## 2026-07-15 - Task: Prepare v0.2.0-beta.2 prerelease
+
+### What was done
+- Prepared the second `v0.2.0` Beta release for boot-time streaming recovery and the official fixed 640x480 Camera2 SurfaceTexture path.
+- Updated prerelease download links and generated GitHub Release notes to identify `v0.2.0-beta.2` and its real-robot verification boundary accurately.
+
+### Testing
+- Reused the successful final `./gradlew :app:lintDebug :app:assembleDebug --console=plain` verification for the release implementation.
+- Ran `git diff --check` successfully before release publication.
+- GitHub Actions will rebuild the APK and publish the prerelease after the `v0.2.0-beta.2` tag is pushed.
+
+### Notes
+- `README.md`: updated the latest prerelease version, APK name, download links, and installation examples to `v0.2.0-beta.2`.
+- `.github/workflows/release.yml`: corrected the Beta description for the official Camera2 path and boot recovery release.
+- `progress.md`: appended this release-preparation record.
+- Rollback point: revert this release-preparation commit; if already published, deleting the `v0.2.0-beta.2` Release or tag requires explicit approval.
