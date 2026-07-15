@@ -25,6 +25,10 @@ package com.serenegiant.usbcameratest7;
 
 import android.Manifest;
 import android.app.Activity;
+import android.annotation.TargetApi;
+import android.content.ComponentName;
+import android.content.Intent;
+import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageInfo;
 import android.graphics.Bitmap;
@@ -43,6 +47,7 @@ import android.hardware.usb.UsbInterface;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.IBinder;
 import android.os.Looper;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
@@ -144,6 +149,7 @@ public final class MainActivity extends Activity {
     private USBMonitor mUSBMonitor;
     private CameraStreamHub mStreamHub;
     private CameraPushClient mPushClient;
+    private CameraStreamingService mStreamingService;
     private CameraManager mCamera2Manager;
     private CameraSlot[] mSlots;
     private TextView mStatusText;
@@ -176,22 +182,60 @@ public final class MainActivity extends Activity {
     private int mPushIntervalMs;
     private int mFirstSlotSkipCount;
     private String mFirstSlotDeviceFilter;
+    private boolean mStreamingServiceBound;
+
+    private final ServiceConnection mStreamingServiceConnection = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(final ComponentName name, final IBinder service) {
+            if (service instanceof CameraStreamingService.LocalBinder) {
+                final CameraStreamingService.LocalBinder binder =
+                    (CameraStreamingService.LocalBinder)service;
+                mStreamingService = binder.getService();
+                mStreamingServiceBound = true;
+                addLog("前台推流服务已连接，Activity仅显示状态，不接管摄像头");
+                refreshStreamingServiceUi();
+            }
+        }
+
+        @Override
+        public void onServiceDisconnected(final ComponentName name) {
+            mStreamingService = null;
+            mStreamingServiceBound = false;
+            addLog("前台推流服务连接已断开");
+        }
+    };
+
+    private final Runnable mServiceUiRunnable = new Runnable() {
+        @Override
+        public void run() {
+            refreshStreamingServiceUi();
+            if (mUseCamera2 && !isFinishing()) {
+                mUiHandler.postDelayed(this, 1000);
+            }
+        }
+    };
 
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setContentView(createContentView());
-        mUSBMonitor = new USBMonitor(this, mOnDeviceConnectListener);
-        mStreamHub = new CameraStreamHub(MAX_CAMERAS, STREAM_PORT, new CameraStreamHub.LogSink() {
-            @Override
-            public void log(final String message) {
-                addLog(message);
-            }
-        });
-        configurePushClient();
         mUseCamera2 = getIntent() == null
             || getIntent().getBooleanExtra("use_camera2",
                 getIntent().getBooleanExtra("camera2_mode", USE_CAMERA2_BY_DEFAULT));
+        if (mUseCamera2 && Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+            mUseCamera2 = false;
+        }
+        setContentView(createContentView());
+        mUSBMonitor = new USBMonitor(this, mOnDeviceConnectListener);
+        if (!mUseCamera2) {
+            mStreamHub = new CameraStreamHub(MAX_CAMERAS, STREAM_PORT,
+                new CameraStreamHub.LogSink() {
+                    @Override
+                    public void log(final String message) {
+                        addLog(message);
+                    }
+                });
+        }
+        configurePushClient();
         mFirstSlotOnlyMode = getIntent() != null
             && getIntent().getBooleanExtra("first_slot_only", false);
         mDisableFirstSlotYuyv = getIntent() != null
@@ -231,16 +275,14 @@ public final class MainActivity extends Activity {
         if (mFirstSlotDeviceFilter != null) {
             addLog("ADB调试：第1路只匹配USB设备：" + mFirstSlotDeviceFilter);
         }
-        if (mPushClient != null) {
-            addLog("WebSocket主动推流已启用：目标=" + mPushClient.getTargetUrl()
+        if (mPushEnabled) {
+            addLog("WebSocket主动推流已启用：目标=" + mPushTargetUrl
                 + "，路数=" + mPushSlotCount + "，间隔=" + mPushIntervalMs + "ms");
         } else {
             addLog("WebSocket主动推流已关闭：可通过ADB extra push_enabled=true 启用");
         }
         if (mUseCamera2) {
-            addLog("Camera2模式：预览尺寸按官方代码固定为 "
-                + TARGET_WIDTH + "x" + TARGET_HEIGHT
-                + "，通过TextureView抓图生成 /stream/N.mjpeg");
+            addLog("Camera2模式：前台服务使用ImageReader生成JPEG，Activity切到后台后继续推流");
         } else if (mDisableFirstSlotYuyv) {
             addLog("ADB调试：第1路YUYV兜底已关闭，本次第1路只探测MJPEG");
         } else {
@@ -267,6 +309,14 @@ public final class MainActivity extends Activity {
     @Override
     protected void onStart() {
         super.onStart();
+        if (mUseCamera2) {
+            if (ensureCamera2Permission() && startCameraStreamingService()) {
+                bindCameraStreamingService();
+                mUiHandler.removeCallbacks(mServiceUiRunnable);
+                mUiHandler.post(mServiceUiRunnable);
+            }
+            return;
+        }
         if (!mUseCamera2 && mUSBMonitor != null) {
             mUSBMonitor.register();
         }
@@ -284,6 +334,12 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onStop() {
+        if (mUseCamera2) {
+            mUiHandler.removeCallbacks(mServiceUiRunnable);
+            unbindCameraStreamingService();
+            super.onStop();
+            return;
+        }
         mUiHandler.removeCallbacks(mScanRunnable);
         mUiHandler.removeCallbacks(mFpsRunnable);
         mUiHandler.removeCallbacks(mPermissionRequestRunnable);
@@ -303,6 +359,8 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        mUiHandler.removeCallbacks(mServiceUiRunnable);
+        unbindCameraStreamingService();
         if (mPushClient != null) {
             mPushClient.stop();
             mPushClient = null;
@@ -343,7 +401,7 @@ public final class MainActivity extends Activity {
             DEFAULT_PUSH_SLOT_COUNT), MAX_CAMERAS));
         mPushIntervalMs = Math.max(MIN_PUSH_INTERVAL_MS,
             readIntExtra("push_interval_ms", DEFAULT_PUSH_INTERVAL_MS));
-        if (!mPushEnabled) {
+        if (mUseCamera2 || !mPushEnabled) {
             mPushClient = null;
             return;
         }
@@ -378,6 +436,116 @@ public final class MainActivity extends Activity {
         return getIntent() != null ? getIntent().getIntExtra(extraName, defaultValue) : defaultValue;
     }
 
+    private Intent createCameraStreamingServiceIntent() {
+        final Intent serviceIntent = new Intent(this, CameraStreamingService.class);
+        serviceIntent.setAction(CameraStreamingService.ACTION_START);
+        serviceIntent.putExtra(CameraStreamingService.EXTRA_CAMERA_SLOT_COUNT,
+            mFirstSlotOnlyMode ? 1 : MAX_CAMERAS);
+        serviceIntent.putExtra(CameraStreamingService.EXTRA_PUSH_ENABLED, mPushEnabled);
+        serviceIntent.putExtra(CameraStreamingService.EXTRA_PUSH_TARGET_URL, mPushTargetUrl);
+        serviceIntent.putExtra(CameraStreamingService.EXTRA_PUSH_SLOT_COUNT, mPushSlotCount);
+        serviceIntent.putExtra(CameraStreamingService.EXTRA_PUSH_INTERVAL_MS, mPushIntervalMs);
+        return serviceIntent;
+    }
+
+    private boolean startCameraStreamingService() {
+        if (!mUseCamera2 || !ensureCamera2Permission()) return false;
+        final Intent serviceIntent = createCameraStreamingServiceIntent();
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent);
+            } else {
+                startService(serviceIntent);
+            }
+            addLog("已请求启动前台摄像头推流服务，切到其他App后仍持续运行");
+            return true;
+        } catch (final Exception exception) {
+            Log.e(TAG, "Failed to start camera streaming service", exception);
+            addLog("前台摄像头推流服务启动失败：" + exception.getMessage());
+            updateStatus("后台推流服务启动失败");
+            return false;
+        }
+    }
+
+    private void restartCameraStreamingService() {
+        if (startCameraStreamingService()) {
+            bindCameraStreamingService();
+            mUiHandler.removeCallbacks(mServiceUiRunnable);
+            mUiHandler.post(mServiceUiRunnable);
+        }
+    }
+
+    private void stopCameraStreamingService() {
+        mUiHandler.removeCallbacks(mServiceUiRunnable);
+        unbindCameraStreamingService();
+        try {
+            stopService(new Intent(this, CameraStreamingService.class));
+            addLog("已请求停止前台摄像头推流服务");
+        } catch (final Exception exception) {
+            Log.w(TAG, "Failed to stop camera streaming service", exception);
+            addLog("停止前台摄像头推流服务失败：" + exception.getMessage());
+        }
+        mStreamingService = null;
+        updateVisibleSlots(0);
+    }
+
+    private void bindCameraStreamingService() {
+        if (mStreamingServiceBound) return;
+        try {
+            mStreamingServiceBound = bindService(
+                new Intent(this, CameraStreamingService.class),
+                mStreamingServiceConnection, 0);
+        } catch (final Exception exception) {
+            mStreamingServiceBound = false;
+            addLog("绑定前台摄像头推流服务失败：" + exception.getMessage());
+        }
+    }
+
+    private void unbindCameraStreamingService() {
+        if (!mStreamingServiceBound) return;
+        try {
+            unbindService(mStreamingServiceConnection);
+        } catch (final IllegalArgumentException ignored) {
+        }
+        mStreamingServiceBound = false;
+        mStreamingService = null;
+    }
+
+    private void refreshStreamingServiceUi() {
+        final CameraStreamingService streamingService = mStreamingService;
+        if (!mUseCamera2 || streamingService == null) {
+            if (mStatusText != null && mUseCamera2) {
+                mStatusText.setText("后台推流服务连接中...");
+            }
+            return;
+        }
+
+        final int activeSlotCount = streamingService.getActiveSlotCount();
+        mLastCamera2Count = activeSlotCount;
+        updateVisibleSlots(activeSlotCount);
+        for (int slotIndex = 0; slotIndex < activeSlotCount; slotIndex++) {
+            final CameraStreamingService.SlotSnapshot snapshot =
+                streamingService.getSlotSnapshot(slotIndex);
+            if (snapshot != null) {
+                mSlots[slotIndex].updateFromStreamingService(snapshot);
+            }
+        }
+        if (mStatusText != null) {
+            mStatusText.setText(streamingService.getStatusSummary());
+        }
+        if (mServerText != null) {
+            mServerText.setText("前台服务持续运行：" + streamingService.getHttpBaseUrl()
+                + " | WebSocket=" + streamingService.getPushStatus()
+                + "\n切到其他App不会停止；点“关闭全部”才会释放摄像头");
+        }
+        if (mLogText != null) {
+            final String serviceLogText = streamingService.getRecentLogText();
+            if (serviceLogText.length() > 0) {
+                mLogText.setText(serviceLogText);
+            }
+        }
+    }
+
     private View createContentView() {
         final LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -407,8 +575,13 @@ public final class MainActivity extends Activity {
         closeButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(final View v) {
-                closeAllCameras();
-                updateStatus("已关闭全部摄像头");
+                if (mUseCamera2) {
+                    stopCameraStreamingService();
+                    updateStatus("已停止后台摄像头推流服务");
+                } else {
+                    closeAllCameras();
+                    updateStatus("已关闭全部摄像头");
+                }
             }
         });
         topBar.addView(closeButton, new LinearLayout.LayoutParams(
@@ -521,6 +694,10 @@ public final class MainActivity extends Activity {
         mFirstSlotOnlyMode = true;
         addLog("第1路独占模式：将关闭其它路，只打开扫描到的第1个"
             + (mUseCamera2 ? "Camera2 ID" : "UVC设备") + "验证/stream/0.mjpeg");
+        if (mUseCamera2) {
+            restartCameraStreamingService();
+            return;
+        }
         closeAllCameras();
         scanAndOpenActiveCameraMode();
     }
@@ -620,14 +797,25 @@ public final class MainActivity extends Activity {
                 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
             addLog("Camera2模式：摄像头权限" + (granted ? "已授权" : "被拒绝"));
             if (granted) {
-                scanAndOpenCamera2Devices();
+                if (startCameraStreamingService()) {
+                    bindCameraStreamingService();
+                    mUiHandler.removeCallbacks(mServiceUiRunnable);
+                    mUiHandler.post(mServiceUiRunnable);
+                }
             } else {
                 updateStatus("Camera2摄像头权限被拒绝");
             }
         }
     }
 
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
     private void scanAndOpenCamera2Devices() {
+        if (mUseCamera2) {
+            if (startCameraStreamingService()) {
+                bindCameraStreamingService();
+            }
+            return;
+        }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
             addLog("Camera2模式不可用：系统版本低于Android 5.0，回退到UVC模式");
             mUseCamera2 = false;
@@ -669,6 +857,7 @@ public final class MainActivity extends Activity {
         }
     }
 
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
     private Range<Integer> chooseCamera2FpsRange(final String cameraId) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP
             || mCamera2Manager == null || cameraId == null) {
@@ -721,10 +910,12 @@ public final class MainActivity extends Activity {
         }
     }
 
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
     private String formatCamera2FpsRange(final Range<Integer> range) {
         return range == null ? "系统默认" : range.getLower() + "-" + range.getUpper();
     }
 
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
     private String describeCamera2Id(final String cameraId) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP
             || mCamera2Manager == null || cameraId == null) {
@@ -742,6 +933,7 @@ public final class MainActivity extends Activity {
         }
     }
 
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
     private String camera2FacingName(final Integer facing) {
         if (facing == null) return "unknown";
         switch (facing) {
@@ -756,6 +948,7 @@ public final class MainActivity extends Activity {
         }
     }
 
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
     private String camera2LevelName(final Integer level) {
         if (level == null) return "unknown";
         switch (level) {
@@ -1829,6 +2022,7 @@ public final class MainActivity extends Activity {
         return (int)(value * getResources().getDisplayMetrics().density + 0.5f);
     }
 
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
     private final class CameraSlot {
         final int index;
         final FrameLayout container;
@@ -1857,6 +2051,7 @@ public final class MainActivity extends Activity {
         long lastSurfaceCaptureLogMs;
         long lastSurfaceCaptureJpegMs;
         long surfaceCaptureJpegCount;
+        long lastServiceFrameTimestampMs;
         long openedAtMs;
         boolean firstFrameLogged;
         long lastFrameDebugLogMs;
@@ -1990,6 +2185,36 @@ public final class MainActivity extends Activity {
                     }
                 }
             };
+            refreshLabel();
+        }
+
+        void updateFromStreamingService(
+            final CameraStreamingService.SlotSnapshot snapshot) {
+            if (snapshot == null || snapshot.slotIndex != index) return;
+            camera2Id = snapshot.cameraId;
+            status = snapshot.status;
+            openSequence = index + 1;
+            frameCount.set(snapshot.frameCount);
+            fps = snapshot.fps;
+            preview = new PreviewChoice(
+                snapshot.width > 0 ? snapshot.width : TARGET_WIDTH,
+                snapshot.height > 0 ? snapshot.height : TARGET_HEIGHT,
+                UVCCamera.FRAME_FORMAT_MJPEG);
+            previewReason = "前台服务ImageReader后台采集";
+            openStrategy = previewReason;
+
+            final CameraPushClient.JpegFrame latestFrame = snapshot.latestFrame;
+            if (latestFrame != null && latestFrame.jpegData != null
+                && latestFrame.jpegData.length > 0
+                && latestFrame.timestampMs > lastServiceFrameTimestampMs) {
+                final Bitmap bitmap = BitmapFactory.decodeByteArray(latestFrame.jpegData, 0,
+                    latestFrame.jpegData.length);
+                if (bitmap != null) {
+                    lastServiceFrameTimestampMs = latestFrame.timestampMs;
+                    jpegOverlay.setImageBitmap(bitmap);
+                    jpegOverlay.setVisibility(View.VISIBLE);
+                }
+            }
             refreshLabel();
         }
 
@@ -2504,7 +2729,7 @@ public final class MainActivity extends Activity {
             if (surfaceCaptureJpegCount > 0) {
                 sb.append("\nSurface抓图=").append(surfaceCaptureJpegCount);
             }
-            if (mStreamHub != null) {
+            if (mStreamHub != null && !mUseCamera2) {
                 sb.append(mStreamHub.getSlotLabelExtra(index));
             }
             label.setText(sb.toString());
@@ -2520,6 +2745,9 @@ public final class MainActivity extends Activity {
             if ("READY".equals(rawStatus)) return "可打开";
             if ("OPENING".equals(rawStatus)) return "打开中";
             if ("OPEN".equals(rawStatus)) return "已打开";
+            if ("STREAMING".equals(rawStatus)) return "后台推流中";
+            if ("DISCONNECTED".equals(rawStatus)) return "已断开";
+            if ("CLOSED".equals(rawStatus)) return "已关闭";
             if ("SURFACE DESTROYED".equals(rawStatus)) return "预览窗口已销毁";
             if (rawStatus.startsWith("OPEN FAILED")) return "打开失败" + rawStatus.substring("OPEN FAILED".length());
             return rawStatus;

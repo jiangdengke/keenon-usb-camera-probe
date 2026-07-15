@@ -114,12 +114,23 @@ final class CameraStreamHub {
 
     byte[] getLatestJpegData(final int slotIndex) {
         if (!isValidSlot(slotIndex)) return null;
-        return mSlots[slotIndex].latestJpegData;
+        final SlotState slot = mSlots[slotIndex];
+        final CameraPushClient.JpegFrame latestFrame = slot.latestJpegFrame;
+        return latestFrame != null ? latestFrame.jpegData : slot.latestJpegData;
     }
 
     CameraPushClient.JpegFrame getLatestJpegFrame(final int slotIndex) {
         if (!isValidSlot(slotIndex)) return null;
         final SlotState slot = mSlots[slotIndex];
+        final CameraPushClient.JpegFrame atomicFrame = slot.latestJpegFrame;
+        if (atomicFrame != null && atomicFrame.jpegData != null
+            && atomicFrame.jpegData.length > 0) {
+            final byte[] jpegCopy = new byte[atomicFrame.jpegData.length];
+            System.arraycopy(atomicFrame.jpegData, 0, jpegCopy, 0,
+                atomicFrame.jpegData.length);
+            return new CameraPushClient.JpegFrame(slotIndex, jpegCopy,
+                atomicFrame.timestampMs, atomicFrame.width, atomicFrame.height);
+        }
         final byte[] jpegData = slot.latestJpegData;
         if (jpegData == null || jpegData.length == 0 || slot.latestJpegTimestampMs <= 0) {
             return null;
@@ -132,6 +143,16 @@ final class CameraStreamHub {
 
     void onSurfaceJpegFrame(final int slotIndex, final byte[] jpeg, final int width,
         final int height) {
+        onJpegFrame(slotIndex, jpeg, width, height, "TextureView->JPEG");
+    }
+
+    void onCamera2JpegFrame(final int slotIndex, final byte[] jpeg, final int width,
+        final int height) {
+        onJpegFrame(slotIndex, jpeg, width, height, "Camera2->ImageReader->JPEG");
+    }
+
+    private void onJpegFrame(final int slotIndex, final byte[] jpeg, final int width,
+        final int height, final String sourceName) {
         if (!isValidSlot(slotIndex) || jpeg == null || jpeg.length == 0) return;
         final SlotState slot = mSlots[slotIndex];
         final long now = System.currentTimeMillis();
@@ -141,11 +162,13 @@ final class CameraStreamHub {
         slot.lastFrameBufferBytes = jpeg.length;
         slot.width = width;
         slot.height = height;
-        slot.formatName = "SurfaceJPEG";
+        slot.formatName = sourceName;
+        slot.latestJpegFrame = new CameraPushClient.JpegFrame(slotIndex, jpeg, now,
+            width, height);
         final long jpegFrames = slot.jpegCount.incrementAndGet();
         if (jpegFrames == 1 || now - slot.lastJpegSuccessLogMs > DIAGNOSTIC_LOG_INTERVAL_MS) {
             slot.lastJpegSuccessLogMs = now;
-            log("强诊断：第" + (slotIndex + 1) + "路Surface抓图JPEG已生成，来源=TextureView->JPEG"
+            log("强诊断：第" + (slotIndex + 1) + "路JPEG已生成，来源=" + sourceName
                 + "，JPEG帧=" + jpegFrames + "，大小=" + jpeg.length + "字节");
         }
     }
@@ -242,6 +265,7 @@ final class CameraStreamHub {
         slot.lowBandwidthMode = lowBandwidthMode;
         slot.latestJpegData = null;
         slot.latestJpegTimestampMs = 0;
+        slot.latestJpegFrame = null;
         slot.latestFrameCallbackMs = 0;
         slot.lastFrameBufferBytes = 0;
         slot.lastJpegSuccessLogMs = 0;
@@ -274,6 +298,7 @@ final class CameraStreamHub {
         slot.frameCount = 0;
         slot.latestJpegData = null;
         slot.latestJpegTimestampMs = 0;
+        slot.latestJpegFrame = null;
         slot.latestFrameCallbackMs = 0;
         slot.lastFrameBufferBytes = 0;
         slot.lastJpegSuccessLogMs = 0;
@@ -763,6 +788,7 @@ final class CameraStreamHub {
         volatile float fps;
         volatile byte[] latestJpegData;
         volatile long latestJpegTimestampMs;
+        volatile CameraPushClient.JpegFrame latestJpegFrame;
         volatile long latestFrameCallbackMs;
         volatile int lastFrameBufferBytes;
         volatile long lastJpegEncodeMs;

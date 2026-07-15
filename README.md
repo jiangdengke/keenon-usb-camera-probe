@@ -10,11 +10,13 @@
 
 ## 当前版本
 
+- 最新预发布版：`v0.2.0-beta.1`（包含前台服务后台持续推流能力）
 - 最新正式版：`v0.1.1`
 - 包名：`com.serenegiant.usbcameratest7`
-- APK：`keenon-uvc-multi-probe-v0.1.1.apk`
-- Release：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/tag/v0.1.1>
-- APK 下载：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/download/v0.1.1/keenon-uvc-multi-probe-v0.1.1.apk>
+- 预发布 APK：`keenon-uvc-multi-probe-v0.2.0-beta.1.apk`
+- 预发布 Release：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/tag/v0.2.0-beta.1>
+- 预发布 APK 下载：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/download/v0.2.0-beta.1/keenon-uvc-multi-probe-v0.2.0-beta.1.apk>
+- 稳定版 Release：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/tag/v0.1.1>
 
 ## 核心能力
 
@@ -22,8 +24,25 @@
 
 - 默认使用 Android Camera2/HAL 的 `cameraIdList` 打开摄像头。
 - 该路径对齐 Keenon 官方 `CurrencyCameraActivity` 示例，不再依赖直接 USB/libuvc 打开作为主路径。
-- 预览尺寸固定为 `640x480`。
+- Camera2、JPEG 生成、HTTP 和 WebSocket 由 Android 前台服务持有，不依赖 Activity 的 `TextureView` 生命周期。
+- 服务优先选择 Camera2 上报的 `640x480` JPEG 输出；设备不支持时选择最接近的已上报 JPEG 尺寸。
 - 为降低现场闪屏，Camera2 预览会优先选择接近 `10-15fps` 的系统支持帧率范围。
+
+### 后台持续运行
+
+获得 CAMERA 权限后，App 会启动 `CameraStreamingService` 前台服务，并显示“机器人摄像头推流运行中”常驻通知。
+
+此后切到机器人主页面或其他 App 时：
+
+- `MainActivity.onStop()` 只解绑界面，不关闭摄像头。
+- Camera2 和 JPEG 生成继续运行。
+- HTTP `8080` 服务继续运行。
+- WebSocket 继续向 `ws://192.168.112.194:9090/` 推送。
+- 返回本 App 时只重新连接服务并读取状态，不会重复打开相机或建立第二个推流连接。
+
+点击 App 内“关闭全部”会明确停止前台服务并释放摄像头、HTTP 和 WebSocket 资源。
+
+限制：如果机器人主页面或其他软件也要打开同一组摄像头，Camera HAL 可能拒绝并发访问。前台服务只能解决 Activity 退到后台后被生命周期主动关闭的问题，不能让两个 App 同时独占同一摄像头。
 
 ### 主动 WebSocket 推流
 
@@ -61,7 +80,7 @@ http://机器人IP:8080/snapshot/3.jpg
 ## 安装
 
 ```bash
-adb install -r keenon-uvc-multi-probe-v0.1.1.apk
+adb install -r keenon-uvc-multi-probe-v0.2.0-beta.1.apk
 adb shell monkey -p com.serenegiant.usbcameratest7 1
 ```
 
@@ -69,7 +88,7 @@ adb shell monkey -p com.serenegiant.usbcameratest7 1
 
 ```bash
 adb uninstall com.serenegiant.usbcameratest7
-adb install -r keenon-uvc-multi-probe-v0.1.1.apk
+adb install -r keenon-uvc-multi-probe-v0.2.0-beta.1.apk
 ```
 
 ## 接收端对接说明
@@ -200,6 +219,17 @@ WebSocket推流状态：目标=ws://192.168.112.194:9090/，累计=... S1=... S2
 ```
 
 其中 `S1` 到 `S4` 持续增长，说明 4 路都在推。
+
+### 后台持续推流验证
+
+1. 启动 App 并确认出现“机器人摄像头推流运行中”通知。
+2. 确认 App 日志出现 `Camera2后台：第N路首帧JPEG已到达`。
+3. 在接收端记录 4 路 `sequence` 或接收帧数。
+4. 按 Home 或切换到机器人主页面，保持至少 30 秒。
+5. 确认接收端 4 路序号仍持续增长；同时可继续访问 `http://机器人IP:8080/cameras`。
+6. 返回本 App，确认没有重复 WebSocket 连接，状态仍显示“后台推流服务=运行中”。
+
+如需停止，返回本 App 点击“关闭全部”。强制停止应用、撤销 CAMERA 权限、设备重启，或其他 App 占用同一摄像头时，推流仍会停止。
 
 如果看到：
 

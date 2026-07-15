@@ -516,3 +516,47 @@
 - `README.md`: replaced the old UVC-probe-oriented guide with a v0.1.1 delivery and receiver integration guide.
 - `progress.md`: appended this documentation record.
 - Rollback: revert this task's commit to restore the previous README and progress record.
+
+## 2026-07-15 - Task: Keep Camera2 streams running in the background
+
+### What was done
+- Moved Camera2 capture, HTTP MJPEG serving, and WebSocket JPEG pushing into a foreground service so leaving the Activity no longer releases the camera streams.
+- Kept the Activity as a status and preview client by binding to the running service, while retaining the existing UVC fallback path when Camera2 mode is disabled.
+- Added foreground notification, service restart/reconciliation behavior, and camera availability handling so streams can recover without reopening the Activity.
+- Updated delivery and field-verification documentation for background operation and the persistent notification.
+
+### Testing
+- Ran `./gradlew :app:lintDebug` successfully.
+- Ran `./gradlew :app:assembleDebug` successfully.
+- Ran `git diff --check` successfully.
+- Read IDE diagnostics for the edited Java, manifest, and drawable files; no diagnostics were reported.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamingService.java`: added the foreground service that owns Camera2 capture and both network streaming paths independently of the Activity lifecycle.
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: starts and binds to the foreground service in Camera2 mode and renders service-owned stream status and previews.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java`: added service-facing frame access needed to display and push service-owned camera frames.
+- `app/src/main/AndroidManifest.xml`: registered the foreground camera service and required service permissions.
+- `app/src/main/res/drawable/ic_stat_camera_streaming.xml`: added a compliant monochrome foreground-notification icon.
+- `README.md`: documented background streaming behavior, notification expectations, and operating limits.
+- `docs/eight-camera-probe.md`: documented background field verification and service lifecycle behavior.
+- `progress.md`: appended this implementation and verification record.
+- Rollback: revert this task's changes in the eight files above, or restore the repository state from before this task.
+
+## 2026-07-15 - Task: Prepare v0.2.0-beta.1 prerelease
+
+### What was done
+- Prepared the first `v0.2.0` Beta release for the foreground-service background streaming capability while keeping `v0.1.1` identified as the latest stable release.
+- Updated the tag-triggered GitHub Release notes to describe background Camera2 ownership, stream recovery, onsite verification, and the Beta limitations.
+- Updated installation and download guidance to point field testers to the `v0.2.0-beta.1` APK.
+
+### Testing
+- Ran `./gradlew :app:lintDebug` successfully for the release implementation.
+- Ran `./gradlew :app:assembleDebug` successfully for the release implementation.
+- Ran `git diff --check` successfully before release preparation.
+- GitHub Actions will rebuild and publish the versioned APK when the `v0.2.0-beta.1` tag is pushed.
+
+### Notes
+- `.github/workflows/release.yml`: updated generated release notes for background streaming behavior and Beta field verification.
+- `README.md`: added `v0.2.0-beta.1` prerelease links and changed installation examples to the Beta APK.
+- `progress.md`: appended this release-preparation record.
+- Rollback: revert the release-preparation changes in the three files above; if already published, also delete the `v0.2.0-beta.1` GitHub Release and tag only with explicit approval.

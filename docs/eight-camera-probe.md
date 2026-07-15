@@ -9,8 +9,9 @@ The probe app now shows the detected USB UVC camera count, capped at 8 cameras.
 - The top bar has scan, close, first-slot-only, and Chinese log toggle controls.
 - The built-in strong diagnostics log records each slot's open phase, supported sizes, selected size, frame callback state, JPEG generation, and health diagnosis.
 - By default the app now uses the official-compatible Android Camera2/HAL path first, following the same `cameraIdList` style as Keenon's `CurrencyCameraActivity`. The old USB/libuvc path remains available by disabling Camera2 mode through ADB extras.
-- In Camera2 mode, the app keeps the existing HTTP MJPEG/snapshot endpoints by capturing JPEG from each `TextureView`. To reduce field flicker, the capture interval is 800 ms and the preview request chooses a supported Camera2 fps range closest to 10-15 fps when available.
-- The app also starts an active WebSocket push client by default. It pushes the latest JPEG frames for slots 0-3 to `ws://192.168.112.194:9090/` through one WebSocket connection, with a default 500 ms interval per slot. The existing HTTP MJPEG endpoints remain available for fallback checks.
+- In Camera2 mode, an Android foreground service owns Camera2, service-side `ImageReader` JPEG output, HTTP MJPEG serving, and WebSocket push. The Activity can stop or be covered without destroying the streaming resources.
+- The service still pushes the latest JPEG frames for slots 0-3 to `ws://192.168.112.194:9090/` through one WebSocket connection, with a default 500 ms interval per slot. The existing HTTP MJPEG endpoints remain available for fallback checks while the Activity is in the background.
+- A persistent `机器人摄像头推流运行中` notification indicates that the service is active. Returning to the Activity only reconnects the status UI; tapping `关闭全部` explicitly stops the service and releases Camera2 and network resources.
 - If an opened slot still has no frame callback after 5 seconds, the app automatically reopens that slot up to 2 times. In compatibility recovery mode, retries first try another MJPEG size and then try YUYV. The YUYV fallback binds the real visible preview surface to drive native frame delivery, covers direct green preview output with an overlay, and requests RAW callbacks so Java can convert raw YUYV to JPEG for the on-tile overlay, HTTP streaming, and snapshots. If the first slot's real preview Surface refreshes while Java frame callbacks remain at zero, the app also tries to capture the `TextureView` into JPEG as a fallback source for `/stream/0.mjpeg`.
 - The startup log prints the app version, and each opened slot prints an independent `自动重试监控` start line plus the 5-second check result.
 - Compatibility recovery mode is enabled: each camera open prefers 640x480 or lower MJPEG, uses UVCCamera's default 1-30 FPS range, and keeps the bandwidth factor at 1.00. If a route has no frames, the first retry tries another MJPEG size and the second retry tries YUYV-to-JPEG fallback.
@@ -29,6 +30,10 @@ The probe app now shows the detected USB UVC camera count, capped at 8 cameras.
 When all 8 slots are active, the endpoint range is `/stream/0.mjpeg` through `/stream/7.mjpeg`.
 
 ## Verification
+
+For the Camera2 foreground-service path, first confirm that each required slot logs `Camera2后台：第N路首帧JPEG已到达`. Then switch to the robot home page or another app for at least 30 seconds. The receiver-side per-slot sequence numbers and the HTTP `/cameras` frame data must continue to increase while the probe Activity is stopped. Returning to the probe must not create a second WebSocket connection or duplicate camera sessions.
+
+Another app cannot simultaneously own the same Camera2 devices. If the foreground app also opens these cameras, Camera HAL resource conflict remains an expected limitation even though this service continues running.
 
 An expected 3-camera status is:
 
@@ -61,7 +66,7 @@ For stronger diagnosis, also check the Chinese `强诊断` lines:
 - `MJPEG无帧，改试其它MJPEG分辨率` means the app is testing another MJPEG size after the initial 640x480 MJPEG route had no frame callback.
 - `MJPEG仍无帧，改试YUYV兼容格式` means MJPEG candidates still had no frame callback and the app is testing YUYV.
 - `第1路全档位探测` means the first slot still has no frames after the earlier fallbacks, so the app is automatically rotating through the declared MJPEG/YUYV sizes from smaller to larger for up to 10 retries. If any candidate logs `帧回调首次到达`, `JPEG已生成`, or `Surface抓图JPEG已生成`, field users should immediately test `/stream/0.mjpeg` and `/snapshot/0.jpg`.
-- `官方兼容模式已启用`, `Camera2扫描结果`, `fpsRange`, or `抓图间隔=800ms` means the app is using Android Camera2/HAL instead of the direct USB/libuvc frame callback path. Field users should verify that each tile shows live video, that `Camera2：第N路画面首次到达` appears, and that `/stream/N.mjpeg` is reachable.
+- `前台推流服务已创建`, `Camera2后台扫描结果`, `Camera2后台：第N路首帧JPEG已到达`, or `后台推流服务=运行中` means Camera2/HAL and JPEG generation are owned by the foreground service. Field users should verify that receiver counters continue increasing after switching to another app and that `/stream/N.mjpeg` remains reachable.
 - `WebSocket主动推流已启用`, `WebSocket推流已连接`, or `WebSocket推流状态` means the app is actively pushing JPEG frames to `ws://192.168.112.194:9090/`. The receiver should parse the `KJPG` binary header, use `slotIndex=0..3` to separate the four routes, and treat the remaining payload as JPEG data. If the app logs connection/send failures, check that the receiver is listening as a WebSocket server on port 9090.
 - `真实预览窗口引出帧回调`, `格式=RAW`, `YUYV RAW将转JPEG`, or `来源=YUYV->NV21` means YUYV is being driven through the real Surface while an overlay hides direct green preview output, and Java is trying to generate JPEG frames for the on-tile overlay, HTTP streaming, and snapshots.
 - `Surface抓图JPEG已生成` or `来源=TextureView->JPEG` means the first slot produced JPEG from the real preview Surface even though Java `frameCallback` is still zero; field users should immediately test `/stream/0.mjpeg` and `/snapshot/0.jpg`.

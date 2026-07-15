@@ -83,6 +83,9 @@ jobs:
         run: |
           cat > release/RELEASE_NOTES.md <<EOF
           ## 更新内容
+          - 新增 Android 前台服务，Camera2、JPEG 生成、HTTP 和 WebSocket 推流不再依赖 Activity 生命周期
+          - App 切换到机器人主页面或其他 App 后继续推流，返回界面时只恢复状态展示，不重复打开摄像头或建立第二个连接
+          - 新增摄像头可用性监听和自动重连，摄像头暂时不可用后可由后台服务重新扫描恢复
           - 默认使用 Android Camera2/HAL 官方兼容路径打开摄像头，贴近 Keenon 官方 CurrencyCameraActivity 调用方式
           - 保留 HTTP MJPEG 拉流服务，继续提供 /cameras、/stream/{slot}.mjpeg 和 /snapshot/{slot}.jpg 作为回退验证入口
           - 默认启用主动 WebSocket 推流，将 4 路 JPEG 通过一个长连接推送到 ws://192.168.112.194:9090/
@@ -92,7 +95,12 @@ jobs:
           ## 验证
           - GitHub Actions 自动构建 Android debug APK
           - APK 包含 armeabi-v7a 与 arm64-v8a native 库
-          - 现场日志可通过 WebSocket主动推流已启用、WebSocket推流已连接 和 WebSocket推流状态 确认推流链路
+          - 本地已通过 :app:lintDebug 和 :app:assembleDebug
+          - 现场可切换到机器人主页面并保持至少 30 秒，确认 WebSocket 四路 sequence 持续增长且 HTTP /cameras 仍可访问
+
+          ## 预发布说明
+          - 此版本为后台持续推流首个 Beta，仍需在目标机器人上验证厂商系统的后台与省电策略
+          - Camera HAL 通常不允许两个 App 同时独占同一摄像头；其他软件占用摄像头时，本服务可能无法打开对应路
 
           ## 安装
           \`\`\`bash
