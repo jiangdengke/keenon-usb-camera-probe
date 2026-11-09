@@ -6,9 +6,13 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.ConnectException;
 import java.net.InetSocketAddress;
+import java.net.NoRouteToHostException;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.security.MessageDigest;
@@ -83,7 +87,9 @@ final class CameraPushClient {
 
     CameraPushClient(final String targetUrl, final int slotCount, final long pushIntervalMs,
         final FrameSource frameSource, final LogSink logSink) {
-        mTargetUrl = normalizeTargetUrl(targetUrl);
+        final String normalizedTargetUrl = PushSettings.normalizeTargetUrl(targetUrl);
+        mTargetUrl = normalizedTargetUrl != null ? normalizedTargetUrl
+            : PushSettings.DEFAULT_TARGET_URL;
         mTargetUri = URI.create(mTargetUrl);
         mSlotCount = Math.max(1, slotCount);
         mPushIntervalMs = Math.max(MIN_PUSH_INTERVAL_MS, (int)pushIntervalMs);
@@ -192,44 +198,113 @@ final class CameraPushClient {
         return buffer.array();
     }
 
+    /**
+     * Opens a WebSocket to the target and closes it again, without sending any frame data.
+     * Throws with a readable reason when the receiver does not accept the connection.
+     */
+    static void testConnection(final String targetUrl) throws Exception {
+        final String normalizedTargetUrl = PushSettings.normalizeTargetUrl(targetUrl);
+        if (normalizedTargetUrl == null) {
+            throw new IOException("推流地址无效：" + targetUrl);
+        }
+        final SecureRandom secureRandom = new SecureRandom();
+        final Socket socket = openWebSocket(URI.create(normalizedTargetUrl), secureRandom);
+        try {
+            writeCloseFrame(socket.getOutputStream(), secureRandom);
+        } finally {
+            socket.close();
+        }
+    }
+
     private void connectWebSocket() throws Exception {
-        final String scheme = mTargetUri.getScheme();
-        if (!"ws".equalsIgnoreCase(scheme)) {
-            throw new IOException("当前只支持ws://，目标=" + mTargetUrl);
-        }
-        final String host = mTargetUri.getHost();
-        if (host == null || host.length() == 0) {
-            throw new IOException("推流目标host为空：" + mTargetUrl);
-        }
-        final int port = mTargetUri.getPort() > 0 ? mTargetUri.getPort() : 80;
-        final String path = buildRequestPath(mTargetUri);
-        final Socket socket = new Socket();
-        socket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
-        socket.setTcpNoDelay(true);
-        socket.setSoTimeout(HANDSHAKE_READ_TIMEOUT_MS);
-
-        final String secWebSocketKey = createWebSocketKey();
-        final String hostHeader = port == 80 ? host : host + ":" + port;
-        final String request = "GET " + path + " HTTP/1.1\r\n"
-            + "Host: " + hostHeader + "\r\n"
-            + "Upgrade: websocket\r\n"
-            + "Connection: Upgrade\r\n"
-            + "Sec-WebSocket-Key: " + secWebSocketKey + "\r\n"
-            + "Sec-WebSocket-Version: 13\r\n"
-            + "\r\n";
-        final OutputStream output = socket.getOutputStream();
-        output.write(request.getBytes("US-ASCII"));
-        output.flush();
-
-        final String response = readHandshakeResponse(socket.getInputStream());
-        validateHandshakeResponse(response, secWebSocketKey);
-        socket.setSoTimeout(0);
+        final Socket socket = openWebSocket(mTargetUri, mSecureRandom);
         mSocket = socket;
-        mSocketOutput = output;
+        mSocketOutput = socket.getOutputStream();
         mConnected = true;
     }
 
-    private String readHandshakeResponse(final InputStream input) throws IOException {
+    private static Socket openWebSocket(final URI targetUri, final SecureRandom secureRandom)
+        throws Exception {
+        final String scheme = targetUri.getScheme();
+        if (!"ws".equalsIgnoreCase(scheme)) {
+            throw new IOException("当前只支持ws://，目标=" + targetUri);
+        }
+        final String host = targetUri.getHost();
+        if (host == null || host.length() == 0) {
+            throw new IOException("推流目标host为空：" + targetUri);
+        }
+        final int port = targetUri.getPort() > 0 ? targetUri.getPort() : 80;
+        final String path = buildRequestPath(targetUri);
+        final Socket socket = new Socket();
+        try {
+            connectSocket(socket, host, port);
+            socket.setTcpNoDelay(true);
+            socket.setSoTimeout(HANDSHAKE_READ_TIMEOUT_MS);
+
+            final String secWebSocketKey = createWebSocketKey(secureRandom);
+            final String hostHeader = port == 80 ? host : host + ":" + port;
+            final String request = "GET " + path + " HTTP/1.1\r\n"
+                + "Host: " + hostHeader + "\r\n"
+                + "Upgrade: websocket\r\n"
+                + "Connection: Upgrade\r\n"
+                + "Sec-WebSocket-Key: " + secWebSocketKey + "\r\n"
+                + "Sec-WebSocket-Version: 13\r\n"
+                + "\r\n";
+            final OutputStream output = socket.getOutputStream();
+            output.write(request.getBytes("US-ASCII"));
+            output.flush();
+
+            final String response;
+            try {
+                response = readHandshakeResponse(socket.getInputStream());
+            } catch (final SocketTimeoutException timeout) {
+                throw new IOException("TCP已连上，但" + (HANDSHAKE_READ_TIMEOUT_MS / 1000)
+                    + "秒内没回应WebSocket握手，对方可能不是WebSocket服务");
+            }
+            validateHandshakeResponse(response, secWebSocketKey);
+            socket.setSoTimeout(0);
+            return socket;
+        } catch (final Exception e) {
+            try {
+                socket.close();
+            } catch (final IOException ignored) {
+            }
+            throw e;
+        }
+    }
+
+    private static void connectSocket(final Socket socket, final String host, final int port)
+        throws IOException {
+        try {
+            socket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
+        } catch (final SocketTimeoutException timeout) {
+            throw new IOException("连接超时：" + (CONNECT_TIMEOUT_MS / 1000) + "秒内连不上"
+                + host + ":" + port + "，检查IP、端口和网络");
+        } catch (final NoRouteToHostException noRoute) {
+            throw new IOException("主机不可达：" + host + "，检查机器人和接收端是否在同一网段");
+        } catch (final ConnectException connectFailure) {
+            // Android also reports an unreachable network (no Wi-Fi yet) as ConnectException.
+            final String reason = connectFailure.getMessage() != null
+                ? connectFailure.getMessage() : "";
+            if (reason.toLowerCase(Locale.US).contains("refused")) {
+                throw new IOException("连接被拒绝：" + host + ":" + port
+                    + "能访问，但这个端口没有服务在监听");
+            }
+            throw new IOException("连不上" + host + ":" + port + "，网络不可用或不通：" + reason);
+        } catch (final UnknownHostException unknownHost) {
+            throw new IOException("找不到主机：" + host);
+        }
+    }
+
+    private static void writeCloseFrame(final OutputStream output,
+        final SecureRandom secureRandom) throws IOException {
+        final byte[] mask = new byte[4];
+        secureRandom.nextBytes(mask);
+        output.write(new byte[] { (byte)0x88, (byte)0x80, mask[0], mask[1], mask[2], mask[3] });
+        output.flush();
+    }
+
+    private static String readHandshakeResponse(final InputStream input) throws IOException {
         final ByteArrayOutputStream responseBytes = new ByteArrayOutputStream(1024);
         int previousByte3 = -1;
         int previousByte2 = -1;
@@ -251,8 +326,8 @@ final class CameraPushClient {
         return responseBytes.toString("US-ASCII");
     }
 
-    private void validateHandshakeResponse(final String response, final String secWebSocketKey)
-        throws Exception {
+    private static void validateHandshakeResponse(final String response,
+        final String secWebSocketKey) throws Exception {
         if (response == null || !response.startsWith("HTTP/1.1 101")) {
             throw new IOException("WebSocket握手失败：" + firstResponseLine(response));
         }
@@ -267,8 +342,8 @@ final class CameraPushClient {
         }
     }
 
-    private String firstResponseLine(final String response) {
-        if (response == null) return "无响应";
+    private static String firstResponseLine(final String response) {
+        if (response == null || response.trim().length() == 0) return "无响应，对方直接断开了连接";
         final int newlineIndex = response.indexOf('\n');
         return newlineIndex >= 0 ? response.substring(0, newlineIndex).trim() : response.trim();
     }
@@ -304,13 +379,13 @@ final class CameraPushClient {
         output.flush();
     }
 
-    private String createWebSocketKey() {
+    private static String createWebSocketKey(final SecureRandom secureRandom) {
         final byte[] nonce = new byte[16];
-        mSecureRandom.nextBytes(nonce);
+        secureRandom.nextBytes(nonce);
         return Base64.encodeToString(nonce, Base64.NO_WRAP);
     }
 
-    private String createExpectedAccept(final String secWebSocketKey) throws Exception {
+    private static String createExpectedAccept(final String secWebSocketKey) throws Exception {
         final MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
         final byte[] digest = sha1.digest((secWebSocketKey + WEBSOCKET_GUID).getBytes("US-ASCII"));
         return Base64.encodeToString(digest, Base64.NO_WRAP);
@@ -359,25 +434,6 @@ final class CameraPushClient {
         if (mLogSink != null) {
             mLogSink.log(message);
         }
-    }
-
-    private static String normalizeTargetUrl(final String targetUrl) {
-        final String trimmed = targetUrl == null || targetUrl.trim().length() == 0
-            ? "ws://192.168.112.194:9090/" : targetUrl.trim();
-        if (trimmed.startsWith("ws://")) {
-            return ensurePath(trimmed);
-        }
-        if (trimmed.startsWith("http://")) {
-            return ensurePath("ws://" + trimmed.substring("http://".length()));
-        }
-        return ensurePath("ws://" + trimmed);
-    }
-
-    private static String ensurePath(final String url) {
-        final URI uri = URI.create(url);
-        final String path = uri.getRawPath();
-        if (path != null && path.length() > 0) return url;
-        return url.endsWith("/") ? url : url + "/";
     }
 
     private static String buildRequestPath(final URI uri) {

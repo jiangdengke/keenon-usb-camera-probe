@@ -56,10 +56,6 @@ public final class CameraStreamingService extends Service {
     private static final int STREAM_PORT = 8080;
     private static final int TARGET_WIDTH = 640;
     private static final int TARGET_HEIGHT = 480;
-    private static final String DEFAULT_PUSH_TARGET_URL = "ws://192.168.112.194:9090/";
-    private static final int DEFAULT_PUSH_SLOT_COUNT = 4;
-    private static final int DEFAULT_PUSH_INTERVAL_MS = 500;
-    private static final int MIN_PUSH_INTERVAL_MS = 200;
     private static final int MAX_LOG_LINES = 220;
     private static final int CAMERA_RECONNECT_DELAY_MS = 1500;
     private static final int SURFACE_READBACK_JPEG_QUALITY = 60;
@@ -79,10 +75,10 @@ public final class CameraStreamingService extends Service {
     private volatile boolean mStreamingStarted;
     private volatile int mActiveSlotCount;
     private int mCameraSlotLimit = DEFAULT_CAMERA_SLOT_COUNT;
-    private boolean mPushEnabled = true;
-    private String mPushTargetUrl = DEFAULT_PUSH_TARGET_URL;
-    private int mPushSlotCount = DEFAULT_PUSH_SLOT_COUNT;
-    private int mPushIntervalMs = DEFAULT_PUSH_INTERVAL_MS;
+    private boolean mPushEnabled = PushSettings.DEFAULT_ENABLED;
+    private String mPushTargetUrl = PushSettings.DEFAULT_TARGET_URL;
+    private int mPushSlotCount = PushSettings.DEFAULT_SLOT_COUNT;
+    private int mPushIntervalMs = PushSettings.DEFAULT_INTERVAL_MS;
 
     private final Runnable mCameraReconcileRunnable = new Runnable() {
         @Override
@@ -194,6 +190,10 @@ public final class CameraStreamingService extends Service {
         return isPushConnected() ? "已连接" : "连接中";
     }
 
+    String getPushTargetUrl() {
+        return mPushTargetUrl;
+    }
+
     String getHttpBaseUrl() {
         final CameraStreamHub streamHub = mStreamHub;
         return streamHub != null ? streamHub.getBaseUrl() : "http://机器人IP:" + STREAM_PORT;
@@ -231,20 +231,22 @@ public final class CameraStreamingService extends Service {
     }
 
     private boolean configureFromIntent(final Intent intent) {
-        if (intent == null) return false;
+        // The boot start carries no extras, so it falls back to the saved push settings.
+        final Intent startIntent = intent != null ? intent : new Intent();
+        final PushSettings savedSettings = PushSettings.load(this);
         final boolean previousPushEnabled = mPushEnabled;
         final String previousPushTargetUrl = mPushTargetUrl;
         final int previousPushSlotCount = mPushSlotCount;
         final int previousPushIntervalMs = mPushIntervalMs;
-        mCameraSlotLimit = clamp(intent.getIntExtra(EXTRA_CAMERA_SLOT_COUNT,
+        mCameraSlotLimit = clamp(startIntent.getIntExtra(EXTRA_CAMERA_SLOT_COUNT,
             DEFAULT_CAMERA_SLOT_COUNT), 1, MAX_CAMERA_SLOTS);
-        mPushEnabled = intent.getBooleanExtra(EXTRA_PUSH_ENABLED, true);
-        mPushTargetUrl = normalizeText(intent.getStringExtra(EXTRA_PUSH_TARGET_URL),
-            DEFAULT_PUSH_TARGET_URL);
-        mPushSlotCount = clamp(intent.getIntExtra(EXTRA_PUSH_SLOT_COUNT,
-            DEFAULT_PUSH_SLOT_COUNT), 1, MAX_CAMERA_SLOTS);
-        mPushIntervalMs = Math.max(MIN_PUSH_INTERVAL_MS,
-            intent.getIntExtra(EXTRA_PUSH_INTERVAL_MS, DEFAULT_PUSH_INTERVAL_MS));
+        mPushEnabled = startIntent.getBooleanExtra(EXTRA_PUSH_ENABLED, savedSettings.enabled);
+        mPushTargetUrl = normalizeText(startIntent.getStringExtra(EXTRA_PUSH_TARGET_URL),
+            savedSettings.targetUrl);
+        mPushSlotCount = clamp(startIntent.getIntExtra(EXTRA_PUSH_SLOT_COUNT,
+            savedSettings.slotCount), 1, MAX_CAMERA_SLOTS);
+        mPushIntervalMs = Math.max(PushSettings.MIN_INTERVAL_MS,
+            startIntent.getIntExtra(EXTRA_PUSH_INTERVAL_MS, savedSettings.intervalMs));
         return previousPushEnabled != mPushEnabled
             || !previousPushTargetUrl.equals(mPushTargetUrl)
             || previousPushSlotCount != mPushSlotCount

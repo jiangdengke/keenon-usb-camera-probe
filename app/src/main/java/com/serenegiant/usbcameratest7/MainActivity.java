@@ -25,8 +25,10 @@ package com.serenegiant.usbcameratest7;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.annotation.TargetApi;
 import android.content.ComponentName;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
@@ -50,6 +52,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.text.InputType;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.ForegroundColorSpan;
@@ -61,6 +64,7 @@ import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -134,11 +138,10 @@ public final class MainActivity extends Activity {
     private static final int CAMERA_PERMISSION_REQUEST = 4102;
     private static final int CAMERA2_TARGET_MIN_FPS = 10;
     private static final int CAMERA2_TARGET_MAX_FPS = 15;
-    private static final boolean PUSH_ENABLED_BY_DEFAULT = true;
-    private static final String DEFAULT_PUSH_TARGET_URL = "ws://192.168.112.194:9090/";
-    private static final int DEFAULT_PUSH_SLOT_COUNT = 4;
-    private static final int DEFAULT_PUSH_INTERVAL_MS = 500;
-    private static final int MIN_PUSH_INTERVAL_MS = 200;
+    private static final String[] PUSH_EXTRA_NAMES = {
+        "push_enabled", "enable_push", "push_target_url", "push_url", "push_target",
+        "push_slot_count", "push_interval_ms"
+    };
     private static final int PRIMARY_SLOT_LOG_COLOR = Color.rgb(255, 230, 0);
     private static final float BANDWIDTH_FACTOR = 0.20f;
     private static final float RETRY_BANDWIDTH_FACTOR = 0.10f;
@@ -231,10 +234,10 @@ public final class MainActivity extends Activity {
         if (mUseCamera2 && Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
             mUseCamera2 = false;
         }
-        // Only a fresh boot launch returns to the background; recents and recreation keep the UI.
-        mReturnToBackgroundPending = mUseCamera2 && savedInstanceState == null
-            && getIntent() != null
-            && (getIntent().getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0
+        // Launch extras apply only to a fresh launch, not to recents or Activity recreation.
+        final boolean freshLaunch = savedInstanceState == null && getIntent() != null
+            && (getIntent().getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0;
+        mReturnToBackgroundPending = mUseCamera2 && freshLaunch
             && getIntent().getBooleanExtra(EXTRA_LAUNCHED_FROM_BOOT, false);
         mReturnToBackgroundDeadlineMs = SystemClock.elapsedRealtime()
             + BOOT_RETURN_TO_BACKGROUND_TIMEOUT_MS;
@@ -249,6 +252,7 @@ public final class MainActivity extends Activity {
                     }
                 });
         }
+        loadPushSettings(freshLaunch);
         configurePushClient();
         mFirstSlotOnlyMode = getIntent() != null
             && getIntent().getBooleanExtra("first_slot_only", false);
@@ -410,15 +414,51 @@ public final class MainActivity extends Activity {
         return trimmed.length() > 0 ? trimmed : null;
     }
 
+    /**
+     * Loads the saved push settings. Push extras on a fresh launch override them and are saved,
+     * so the boot start, the launcher icon and the notification keep using them.
+     */
+    private void loadPushSettings(final boolean applyLaunchExtras) {
+        final Intent intent = applyLaunchExtras ? getIntent() : null;
+        if (intent != null && intent.getBooleanExtra("push_reset", false)) {
+            PushSettings.reset(this);
+            addLog("ADB：推流配置已恢复默认");
+        }
+        final PushSettings savedSettings = PushSettings.load(this);
+        if (intent == null || !hasPushExtras(intent)) {
+            applyPushSettings(savedSettings);
+            return;
+        }
+        applyPushSettings(new PushSettings(
+            intent.getBooleanExtra("push_enabled",
+                intent.getBooleanExtra("enable_push", savedSettings.enabled)),
+            resolvePushTargetUrl(intent, savedSettings.targetUrl),
+            intent.getIntExtra("push_slot_count", savedSettings.slotCount),
+            intent.getIntExtra("push_interval_ms", savedSettings.intervalMs)));
+        savePushSettings();
+        addLog("ADB：推流配置已保存，重启后继续使用");
+    }
+
+    private boolean hasPushExtras(final Intent intent) {
+        for (final String extraName : PUSH_EXTRA_NAMES) {
+            if (intent.hasExtra(extraName)) return true;
+        }
+        return false;
+    }
+
+    private void applyPushSettings(final PushSettings settings) {
+        mPushEnabled = settings.enabled;
+        mPushTargetUrl = settings.targetUrl;
+        mPushSlotCount = Math.max(1, Math.min(settings.slotCount, MAX_CAMERAS));
+        mPushIntervalMs = Math.max(PushSettings.MIN_INTERVAL_MS, settings.intervalMs);
+    }
+
+    private void savePushSettings() {
+        new PushSettings(mPushEnabled, mPushTargetUrl, mPushSlotCount, mPushIntervalMs)
+            .save(this);
+    }
+
     private void configurePushClient() {
-        mPushEnabled = getIntent() == null
-            || getIntent().getBooleanExtra("push_enabled",
-                getIntent().getBooleanExtra("enable_push", PUSH_ENABLED_BY_DEFAULT));
-        mPushTargetUrl = resolvePushTargetUrl();
-        mPushSlotCount = Math.max(1, Math.min(readIntExtra("push_slot_count",
-            DEFAULT_PUSH_SLOT_COUNT), MAX_CAMERAS));
-        mPushIntervalMs = Math.max(MIN_PUSH_INTERVAL_MS,
-            readIntExtra("push_interval_ms", DEFAULT_PUSH_INTERVAL_MS));
         if (mUseCamera2 || !mPushEnabled) {
             mPushClient = null;
             return;
@@ -438,20 +478,154 @@ public final class MainActivity extends Activity {
             });
     }
 
-    private String resolvePushTargetUrl() {
-        if (getIntent() == null) return DEFAULT_PUSH_TARGET_URL;
-        String targetUrl = trimToNull(getIntent().getStringExtra("push_target_url"));
+    private String resolvePushTargetUrl(final Intent intent, final String fallbackUrl) {
+        String targetUrl = trimToNull(intent.getStringExtra("push_target_url"));
         if (targetUrl == null) {
-            targetUrl = trimToNull(getIntent().getStringExtra("push_url"));
+            targetUrl = trimToNull(intent.getStringExtra("push_url"));
         }
         if (targetUrl == null) {
-            targetUrl = trimToNull(getIntent().getStringExtra("push_target"));
+            targetUrl = trimToNull(intent.getStringExtra("push_target"));
         }
-        return targetUrl != null ? targetUrl : DEFAULT_PUSH_TARGET_URL;
+        if (targetUrl == null) return fallbackUrl;
+        final String normalizedUrl = PushSettings.normalizeTargetUrl(targetUrl);
+        if (normalizedUrl == null) {
+            addLog("ADB：推流地址无效，继续使用" + fallbackUrl + "，收到的值=" + targetUrl);
+            return fallbackUrl;
+        }
+        return normalizedUrl;
     }
 
-    private int readIntExtra(final String extraName, final int defaultValue) {
-        return getIntent() != null ? getIntent().getIntExtra(extraName, defaultValue) : defaultValue;
+    private void restartPushAfterSettingsChange() {
+        if (mUseCamera2) {
+            // A stopped service stays stopped; its next start reads the saved settings.
+            if (mStreamingService != null) {
+                restartCameraStreamingService();
+            }
+            return;
+        }
+        if (mPushClient != null) {
+            mPushClient.stop();
+        }
+        configurePushClient();
+        if (mPushClient != null) {
+            mPushClient.start();
+        }
+    }
+
+    private void showPushTargetDialog() {
+        final String formatHint = "请输入 ws://IP:端口/ 格式的地址";
+        final LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(16), dp(8), dp(16), 0);
+
+        final EditText targetInput = new EditText(this);
+        targetInput.setSingleLine(true);
+        targetInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        targetInput.setText(mPushTargetUrl);
+        targetInput.setSelection(targetInput.getText().length());
+        content.addView(targetInput, new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        final Button testButton = new Button(this);
+        testButton.setText("测试连接");
+        testButton.setAllCaps(false);
+        content.addView(testButton, new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        final TextView testResult = new TextView(this);
+        testResult.setTextSize(13);
+        testResult.setText("测试只连接一次再断开，不保存地址，也不影响正在运行的推流");
+        content.addView(testResult, new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        testButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(final View v) {
+                final String targetUrl = PushSettings.normalizeTargetUrl(
+                    targetInput.getText().toString());
+                if (targetUrl == null) {
+                    targetInput.setError(formatHint);
+                    return;
+                }
+                testButton.setEnabled(false);
+                testResult.setTextColor(Color.DKGRAY);
+                testResult.setText("正在测试：" + targetUrl);
+                testPushTarget(targetUrl, testButton, testResult);
+            }
+        });
+
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle("WebSocket推流地址")
+            .setMessage("示例：ws://192.168.1.10:9090/\n保存后立即重连，机器人重启后仍然有效")
+            .setView(content)
+            .setPositiveButton("保存", null)
+            .setNeutralButton("恢复默认", new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(final DialogInterface dialogInterface, final int which) {
+                    PushSettings.reset(MainActivity.this);
+                    applyPushSettings(PushSettings.load(MainActivity.this));
+                    addLog("推流配置已恢复默认：目标=" + mPushTargetUrl);
+                    restartPushAfterSettingsChange();
+                }
+            })
+            .setNegativeButton("取消", null)
+            .create();
+        dialog.setOnShowListener(new DialogInterface.OnShowListener() {
+            @Override
+            public void onShow(final DialogInterface dialogInterface) {
+                // Validate before closing, so an invalid address keeps the dialog open.
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(
+                    new View.OnClickListener() {
+                        @Override
+                        public void onClick(final View v) {
+                            final String targetUrl = PushSettings.normalizeTargetUrl(
+                                targetInput.getText().toString());
+                            if (targetUrl == null) {
+                                targetInput.setError(formatHint);
+                                return;
+                            }
+                            mPushTargetUrl = targetUrl;
+                            savePushSettings();
+                            addLog("推流地址已保存，重启后继续使用：目标=" + mPushTargetUrl);
+                            restartPushAfterSettingsChange();
+                            dialog.dismiss();
+                        }
+                    });
+            }
+        });
+        dialog.show();
+    }
+
+    private void testPushTarget(final String targetUrl, final Button testButton,
+        final TextView testResult) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String failureReason = testPushTargetFailureReason(targetUrl);
+                final String resultText = failureReason == null
+                    ? "连接成功：" + targetUrl + " 接受了WebSocket连接"
+                    : "连接失败：" + failureReason;
+                addLog("推流地址测试：" + resultText);
+                mUiHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        testButton.setEnabled(true);
+                        testResult.setTextColor(failureReason == null
+                            ? Color.rgb(0, 128, 0) : Color.rgb(200, 0, 0));
+                        testResult.setText(resultText);
+                    }
+                });
+            }
+        }, "KeenonPushTest").start();
+    }
+
+    private static String testPushTargetFailureReason(final String targetUrl) {
+        try {
+            CameraPushClient.testConnection(targetUrl);
+            return null;
+        } catch (final Exception e) {
+            return e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+        }
     }
 
     private Intent createCameraStreamingServiceIntent() {
@@ -554,6 +728,7 @@ public final class MainActivity extends Activity {
         if (mServerText != null) {
             mServerText.setText("前台服务持续运行：" + streamingService.getHttpBaseUrl()
                 + " | WebSocket=" + streamingService.getPushStatus()
+                + " " + streamingService.getPushTargetUrl()
                 + "\n切到其他App不会停止；点“关闭全部”才会释放摄像头");
         }
         if (mLogText != null) {
@@ -617,6 +792,18 @@ public final class MainActivity extends Activity {
             }
         });
         topBar.addView(closeButton, new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        final Button pushTargetButton = new Button(this);
+        pushTargetButton.setText("推流地址");
+        pushTargetButton.setAllCaps(false);
+        pushTargetButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(final View v) {
+                showPushTargetDialog();
+            }
+        });
+        topBar.addView(pushTargetButton, new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         mFirstOnlyButton = new Button(this);

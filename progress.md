@@ -674,3 +674,31 @@
 - `.github/workflows/release.yml`: added the boot UI launch to the release notes and a real-reboot verification step.
 - `progress.md`: appended this release-preparation record.
 - Rollback point: revert this release-preparation commit; if already published, deleting the `v0.2.0-beta.3` Release or tag requires explicit approval.
+
+## 2026-11-09 - Task: Save the push target and edit it in the app
+
+### What was done
+- Added `PushSettings`, which saves push enabled, target URL, slot count and interval in SharedPreferences and holds the shared defaults and URL normalization.
+- ADB push extras on a fresh launch now override and save the settings. `--ez push_reset true` clears them.
+- Boot, launcher and notification launches now use the saved settings instead of the hard-coded default. The service also falls back to the saved settings when its start intent carries no push extras.
+- Added a "推流地址" button and dialog with save, reset and cancel. Saving reconnects a running service at once.
+- The boot UI launch now uses a launcher-style intent, so `am start -n` with push extras still opens a new instance and applies them.
+- `CameraPushClient` now shares the URL normalization and falls back to the default address instead of throwing on an invalid URL.
+- Added a "测试连接" button to the push address dialog. It runs `CameraPushClient.testConnection()`, which reuses the push handshake, sends a WebSocket close frame and closes the socket, without saving or touching the running push.
+- Connect and handshake failures now carry readable Chinese reasons in both the test result and the push log. A failed handshake now also closes its socket instead of leaking it.
+
+### Testing
+- Ran `./gradlew :app:lintDebug :app:assembleDebug --console=plain` successfully. Lint reported 15 warnings; the new one is `SetTextI18n` on the test result text, the same hard-coded UI text pattern used throughout `MainActivity`.
+- Compiled the real `CameraPushClient` and `PushSettings` on a JVM with Android stubs and ran `testConnection` against local servers: a WebSocket server (success; it received a masked close frame), a closed port (refused), an HTTP server (`WebSocket握手失败：HTTP/1.0 200 OK`), a silent TCP server (no handshake reply after 5 s) and an unresolvable host (unknown host). This Mac routes outbound TCP through a system proxy, so the connect-timeout and unreachable paths could not be observed locally.
+- Ran a scratch Java test of `normalizeTargetUrl`: ws://, upper-case WS://, http:// and bare host[:port] normalize to ws:// with a path; wss://, https://, blank and malformed input return null.
+- Ran `git diff --check` successfully.
+- Real robot verification is still required: save an address in the dialog, reboot, and confirm the receiver gets frames.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/PushSettings.java`: new saved push settings.
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: loads, applies and saves push settings; adds the push address dialog; shows the target URL in the service status line.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamingService.java`: reads saved settings for missing extras; adds `getPushTargetUrl()`.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraPushClient.java`: uses `PushSettings.normalizeTargetUrl`.
+- `app/src/main/java/com/serenegiant/usbcameratest7/BootCompletedReceiver.java`: boot launch intent now matches the launcher intent.
+- `README.md`: documented the dialog, saved ADB settings and `push_reset`.
+- Rollback point: revert these files to commit `ade6fe5` and delete `PushSettings.java`; saved preferences are then ignored.

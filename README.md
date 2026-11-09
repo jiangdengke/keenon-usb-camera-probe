@@ -90,6 +90,21 @@ slotIndex：0, 1, 2, 3
 数据格式：40 字节 KJPG 头 + JPEG 数据
 ```
 
+推流地址可以在 App 里改：点顶部“推流地址”，输入 `ws://接收端IP:端口/`，点“保存”后立即重连。地址会保存在机器人上，重启、从桌面图标或通知栏打开 App 都继续使用。点“恢复默认”回到 `ws://192.168.112.194:9090/`。只支持 `ws://`，不支持 `wss://`。
+
+保存前可以点“测试连接”：App 会按输入框里的地址做一次 TCP 连接和 WebSocket 握手，然后发送关闭帧断开。测试不保存地址，也不影响正在运行的推流。常见结果：
+
+| 结果 | 含义 |
+|---|---|
+| `连接成功` | 接收端接受了 WebSocket 连接，可以保存 |
+| `连接被拒绝` | IP 能到，但端口上没有服务在监听 |
+| `连接超时` | 5 秒内连不上，检查 IP、端口和网络 |
+| `连不上…网络不可用或不通` | 机器人当前没有可用网络 |
+| `主机不可达` | 机器人和接收端可能不在同一网段 |
+| `找不到主机` | 主机名解析失败，建议直接填 IP |
+| `WebSocket握手失败：HTTP/1.1 404` 等 | 端口上是普通 HTTP 服务，或路径不对 |
+| `没回应WebSocket握手` | TCP 能连上，但对方不是 WebSocket 服务 |
+
 ### HTTP 拉流回退
 
 原有 HTTP 拉流仍保留，方便浏览器/VLC/脚本快速验证：
@@ -204,7 +219,7 @@ server.on('connection', (socket) => {
 
 ## ADB 参数
 
-默认情况下不需要传参数。需要临时改推流目标或关闭推流时，可用 ADB extra 覆盖。
+默认情况下不需要传参数。需要改推流目标或关闭推流时，可用 ADB extra 覆盖。带推流参数启动后，推流开关、地址、路数和间隔会一起保存，重启后继续使用，效果和 App 里的“推流地址”一样。无效的地址会被忽略，继续用原来的地址。
 
 ### 修改推流目标
 
@@ -221,6 +236,13 @@ adb shell am start -n com.serenegiant.usbcameratest7/.MainActivity \
 ```bash
 adb shell am start -n com.serenegiant.usbcameratest7/.MainActivity \
   --ez push_enabled false
+```
+
+### 恢复默认推流配置
+
+```bash
+adb shell am start -n com.serenegiant.usbcameratest7/.MainActivity \
+  --ez push_reset true
 ```
 
 ### 回退到旧 USB/libuvc 模式

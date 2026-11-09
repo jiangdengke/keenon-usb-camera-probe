@@ -59,7 +59,11 @@ public final class BootCompletedReceiver extends BroadcastReceiver {
     }
 
     private void launchActivityForBoot(final Context context) {
-        final Intent activityIntent = new Intent(context, MainActivity.class);
+        // Match the launcher intent: a later launcher tap resumes this task, while an ADB
+        // "am start -n" with push extras still opens a new instance that applies them.
+        final Intent activityIntent = new Intent(Intent.ACTION_MAIN);
+        activityIntent.addCategory(Intent.CATEGORY_LAUNCHER);
+        activityIntent.setClass(context, MainActivity.class);
         activityIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         activityIntent.putExtra(MainActivity.EXTRA_LAUNCHED_FROM_BOOT, true);
         try {
