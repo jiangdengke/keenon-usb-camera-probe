@@ -49,6 +49,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.ForegroundColorSpan;
@@ -96,7 +97,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * output on top of this proof.
  */
 public final class MainActivity extends Activity {
+    static final String EXTRA_LAUNCHED_FROM_BOOT = "launched_from_boot";
     private static final String TAG = "KeenonUvcProbe";
+    private static final long BOOT_RETURN_TO_BACKGROUND_TIMEOUT_MS = 20000;
 
     private static final int MAX_CAMERAS = 8;
     private static final int OFFICIAL_CAMERA2_SLOT_COUNT = 4;
@@ -184,6 +187,8 @@ public final class MainActivity extends Activity {
     private int mFirstSlotSkipCount;
     private String mFirstSlotDeviceFilter;
     private boolean mStreamingServiceBound;
+    private boolean mReturnToBackgroundPending;
+    private long mReturnToBackgroundDeadlineMs;
 
     private final ServiceConnection mStreamingServiceConnection = new ServiceConnection() {
         @Override
@@ -210,6 +215,7 @@ public final class MainActivity extends Activity {
         @Override
         public void run() {
             refreshStreamingServiceUi();
+            returnToBackgroundIfBootReady();
             if (mUseCamera2 && !isFinishing()) {
                 mUiHandler.postDelayed(this, 1000);
             }
@@ -225,6 +231,13 @@ public final class MainActivity extends Activity {
         if (mUseCamera2 && Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
             mUseCamera2 = false;
         }
+        // Only a fresh boot launch returns to the background; recents and recreation keep the UI.
+        mReturnToBackgroundPending = mUseCamera2 && savedInstanceState == null
+            && getIntent() != null
+            && (getIntent().getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0
+            && getIntent().getBooleanExtra(EXTRA_LAUNCHED_FROM_BOOT, false);
+        mReturnToBackgroundDeadlineMs = SystemClock.elapsedRealtime()
+            + BOOT_RETURN_TO_BACKGROUND_TIMEOUT_MS;
         setContentView(createContentView());
         mUSBMonitor = new USBMonitor(this, mOnDeviceConnectListener);
         if (!mUseCamera2) {
@@ -281,6 +294,10 @@ public final class MainActivity extends Activity {
                 + "，路数=" + mPushSlotCount + "，间隔=" + mPushIntervalMs + "ms");
         } else {
             addLog("WebSocket主动推流已关闭：可通过ADB extra push_enabled=true 启用");
+        }
+        if (mReturnToBackgroundPending) {
+            addLog("开机拉起界面：摄像头出图后自动退回后台，最多等待"
+                + (BOOT_RETURN_TO_BACKGROUND_TIMEOUT_MS / 1000) + "秒");
         }
         if (mUseCamera2) {
             addLog("Camera2模式：前台服务使用官方640x480 SurfaceTexture生成JPEG，Activity切到后台后继续推流");
@@ -545,6 +562,20 @@ public final class MainActivity extends Activity {
                 mLogText.setText(serviceLogText);
             }
         }
+    }
+
+    private void returnToBackgroundIfBootReady() {
+        if (!mReturnToBackgroundPending) return;
+        final CameraStreamingService streamingService = mStreamingService;
+        final boolean camerasReady = streamingService != null
+            && streamingService.areActiveSlotsProducingJpeg();
+        final boolean timedOut = SystemClock.elapsedRealtime() >= mReturnToBackgroundDeadlineMs;
+        if (!camerasReady && !timedOut) return;
+        mReturnToBackgroundPending = false;
+        addLog(camerasReady
+            ? "开机拉起界面：摄像头已出图，界面退回后台，推流继续运行"
+            : "开机拉起界面：等待出图超时，界面退回后台，推流继续运行");
+        moveTaskToBack(true);
     }
 
     private View createContentView() {

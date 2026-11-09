@@ -174,6 +174,16 @@ public final class CameraStreamingService extends Service {
         return mStreamingStarted;
     }
 
+    boolean areActiveSlotsProducingJpeg() {
+        final int activeSlotCount = mActiveSlotCount;
+        if (activeSlotCount == 0) return false;
+        for (int slotIndex = 0; slotIndex < activeSlotCount; slotIndex++) {
+            final CameraSlotState slot = mCameraSlots[slotIndex];
+            if (!"STREAMING".equals(slot.status) || slot.jpegFrameCount == 0) return false;
+        }
+        return true;
+    }
+
     boolean isPushConnected() {
         final CameraPushClient pushClient = mPushClient;
         return pushClient != null && pushClient.isConnected();

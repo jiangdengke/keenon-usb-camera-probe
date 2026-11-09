@@ -633,3 +633,27 @@
 - `.github/workflows/release.yml`: corrected the Beta description for the official Camera2 path and boot recovery release.
 - `progress.md`: appended this release-preparation record.
 - Rollback point: revert this release-preparation commit; if already published, deleting the `v0.2.0-beta.2` Release or tag requires explicit approval.
+
+## 2026-11-09 - Task: Launch the Activity at boot, then return it to the background
+
+### What was done
+- On Android 9 and lower, `BootCompletedReceiver` now launches `MainActivity` in a new task with the `launched_from_boot` extra, so the cameras open with foreground priority, the same as a manual open. The receiver still starts `CameraStreamingService` as a safety net.
+- A boot-launched `MainActivity` moves its task to the background once every active Camera2 slot is streaming and has produced a JPEG, or after 20 seconds. The app stays in recents.
+- Launches from the launcher icon, the notification, recents, or Activity recreation do not move the task back.
+- Android 10 and higher keep the service-only boot start and log that the boot UI launch is skipped.
+
+### Why
+- Field report: after a reboot the notification showed four routes, recents had no app entry, and the receiver got no frames. Opening the app manually and pressing Home streamed correctly on the same Android 9-or-lower robot.
+
+### Testing
+- Ran `./gradlew :app:lintDebug :app:assembleDebug --console=plain` successfully. Lint reported 14 warnings, none in the changed code.
+- Ran `git diff --check` successfully.
+- Real robot reboot verification is still required: the UI should appear, return to the background on its own, and the receiver should get all four routes.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/BootCompletedReceiver.java`: launches the Activity on API 21-28 before the existing service start.
+- `app/src/main/java/com/serenegiant/usbcameratest7/MainActivity.java`: added `EXTRA_LAUNCHED_FROM_BOOT` and the return-to-background check in the service UI refresh loop.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamingService.java`: added `areActiveSlotsProducingJpeg()`.
+- `README.md` and `docs/eight-camera-probe.md`: documented the new boot behavior, log lines and the `KeenonUvcProbe` log tag.
+- The notification text still reflects the camera ID count, not real frame flow; that is out of scope for this task.
+- Rollback point: revert the changes to the three Java files and the two documents; boot then returns to the service-only start.

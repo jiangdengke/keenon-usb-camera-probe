@@ -46,7 +46,13 @@
 
 ### 开机自动恢复
 
-App 安装后需要至少打开一次并授予 CAMERA 权限。此后机器人正常开机完成时，App 会在不打开界面的情况下自动启动 `CameraStreamingService`，恢复 Camera2、HTTP 和 WebSocket 推流。
+App 安装后需要至少打开一次并授予 CAMERA 权限。此后机器人正常开机完成时，App 会自动恢复 Camera2、HTTP 和 WebSocket 推流：
+
+- Android 9 及以下：先拉起 App 界面，让摄像头在前台打开，和手动打开 App 的路径一致。所有摄像头都生成 JPEG 后，界面自动退回后台；最多等待 20 秒。之后最近任务里能看到 App，推流由前台服务继续运行。
+- Android 10 及以上：系统禁止开机广播在后台启动界面，只启动 `CameraStreamingService`。
+- 两种情况都会同时启动 `CameraStreamingService`。界面被固件拦截时，服务仍会推流。
+
+开机时界面会短暂盖住机器人主页面，并以前台优先级打开摄像头，效果等同于手动打开一次 App。
 
 开机自启遵循以下边界：
 
@@ -62,10 +68,10 @@ App 安装后需要至少打开一次并授予 CAMERA 权限。此后机器人�
 adb reboot
 adb wait-for-device
 adb shell dumpsys activity services com.serenegiant.usbcameratest7
-adb shell logcat -d -s KeenonBootReceiver:I KeenonCameraService:I '*:S'
+adb shell logcat -d -s KeenonBootReceiver:I KeenonCameraService:I KeenonUvcProbe:I '*:S'
 ```
 
-正常情况下无需启动 Activity，通知栏会出现“机器人摄像头推流运行中”，日志包含 `开机自启已触发`，WebSocket 四路序号与 HTTP `/cameras` 数据会重新增长。`BOOT_COMPLETED` 是系统受保护广播，普通非 root ADB 环境可能不允许手工伪造，因此应以真实重启结果为准。
+正常情况下无需手动操作。Android 9 及以下，App 界面会先出现，再自动退回后台，日志包含 `开机拉起界面已触发` 和 `开机拉起界面：摄像头已出图，界面退回后台`。通知栏会出现“机器人摄像头推流运行中”，日志包含 `开机自启已触发`，WebSocket 四路序号与 HTTP `/cameras` 数据会重新增长。如果日志是 `等待出图超时`，说明 20 秒内有摄像头没出图，需要继续看 `KeenonCameraService` 日志。`BOOT_COMPLETED` 是系统受保护广播，普通非 root ADB 环境可能不允许手工伪造，因此应以真实重启结果为准。
 
 ### 主动 WebSocket 推流
 
