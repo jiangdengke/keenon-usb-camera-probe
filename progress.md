@@ -657,3 +657,20 @@
 - `README.md` and `docs/eight-camera-probe.md`: documented the new boot behavior, log lines and the `KeenonUvcProbe` log tag.
 - The notification text still reflects the camera ID count, not real frame flow; that is out of scope for this task.
 - Rollback point: revert the changes to the three Java files and the two documents; boot then returns to the service-only start.
+
+## 2026-11-09 - Task: Prepare v0.2.0-beta.3 prerelease
+
+### What was done
+- Prepared the third `v0.2.0` Beta release for the boot UI launch that returns to the background after the cameras produce frames.
+- Updated prerelease download links and generated GitHub Release notes to describe the boot behavior and its real-robot verification boundary.
+
+### Testing
+- Reused the successful `./gradlew :app:lintDebug :app:assembleDebug --console=plain` verification from the boot UI launch implementation.
+- Ran `git diff --check` successfully before release publication.
+- GitHub Actions will rebuild the APK and publish the prerelease after the `v0.2.0-beta.3` tag is pushed.
+
+### Notes
+- `README.md`: updated the latest prerelease version, APK name, download links, and installation examples to `v0.2.0-beta.3`.
+- `.github/workflows/release.yml`: added the boot UI launch to the release notes and a real-reboot verification step.
+- `progress.md`: appended this release-preparation record.
+- Rollback point: revert this release-preparation commit; if already published, deleting the `v0.2.0-beta.3` Release or tag requires explicit approval.

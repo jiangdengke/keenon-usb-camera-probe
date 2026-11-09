@@ -83,6 +83,9 @@ jobs:
         run: |
           cat > release/RELEASE_NOTES.md <<EOF
           ## 更新内容
+          - Android 9 及以下开机时先拉起界面，让摄像头以前台身份打开，与手动打开 App 的路径一致
+          - 四路都生成 JPEG 或等待 20 秒后，界面自动退回后台并保留在最近任务，前台服务继续推流
+          - 开机仍同时启动前台推流服务，界面被固件拦截时继续推流；Android 10 及以上只启动服务
           - Camera2 采集严格对齐 Keenon 官方 CurrencyCameraActivity：按 cameraIdList 顺序打开前 4 路，每路固定一个 640x480 SurfaceTexture 和 TEMPLATE_PREVIEW 单 Surface 请求
           - 移除后台 JPEG ImageReader 尺寸选择，避免某一路回退到 1920x1080 后无法产出 WebSocket 推流帧
           - 通过固定 640x480 SurfaceTexture 离屏读回继续生成 HTTP 与 WebSocket 所需 JPEG，不改变 KJPG 协议和四路槽位映射
@@ -100,9 +103,11 @@ jobs:
           - APK 包含 armeabi-v7a 与 arm64-v8a native 库
           - 本地已通过 :app:lintDebug 和 :app:assembleDebug
           - 现场可切换到机器人主页面并保持至少 30 秒，确认 WebSocket 四路 sequence 持续增长且 HTTP /cameras 仍可访问
+          - 现场执行真实重启且不触碰屏幕，确认界面自动退回后台、最近任务可见，且 WebSocket 四路 sequence 持续增长
 
           ## 预发布说明
-          - 此版本为官方 640x480 Camera2 路径与开机恢复能力的 Beta，仍需在目标机器人上验证四路画面、后台与省电策略
+          - 此版本为开机拉起界面后退回后台的 Beta，仍需在目标机器人上验证开机后四路画面、后台与省电策略
+          - 开机时界面会短暂覆盖机器人主页面，并以前台优先级打开摄像头，效果等同于手动打开一次 App
           - Camera HAL 通常不允许两个 App 同时独占同一摄像头；其他软件占用摄像头时，本服务可能无法打开对应路
 
           ## 安装
