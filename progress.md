@@ -702,3 +702,20 @@
 - `app/src/main/java/com/serenegiant/usbcameratest7/BootCompletedReceiver.java`: boot launch intent now matches the launcher intent.
 - `README.md`: documented the dialog, saved ADB settings and `push_reset`.
 - Rollback point: revert these files to commit `ade6fe5` and delete `PushSettings.java`; saved preferences are then ignored.
+
+## 2026-11-09 - Task: Prepare v0.2.0-beta.4 prerelease
+
+### What was done
+- Prepared the fourth `v0.2.0` Beta release for the saved push target, the in-app push address dialog and its test-connection button.
+- Updated prerelease download links and generated GitHub Release notes to describe the new settings and their real-robot verification boundary.
+
+### Testing
+- Reused the successful `./gradlew :app:lintDebug :app:assembleDebug --console=plain` and local `testConnection` checks from the push target implementation.
+- Ran `git diff --check` successfully before release publication.
+- GitHub Actions will rebuild the APK and publish the prerelease after the `v0.2.0-beta.4` tag is pushed.
+
+### Notes
+- `README.md`: updated the latest prerelease version, APK name, download links, and installation examples to `v0.2.0-beta.4`.
+- `.github/workflows/release.yml`: added the push address dialog, saved settings and test connection to the release notes, plus the matching verification steps.
+- `progress.md`: appended this release-preparation record.
+- Rollback point: revert this release-preparation commit; if already published, deleting the `v0.2.0-beta.4` Release or tag requires explicit approval.

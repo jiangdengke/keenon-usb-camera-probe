@@ -10,12 +10,12 @@
 
 ## 当前版本
 
-- 最新预发布版：`v0.2.0-beta.3`（包含开机拉起界面后退回后台的推流修复）
+- 最新预发布版：`v0.2.0-beta.4`（包含推流地址保存、界面修改与测试连接）
 - 最新正式版：`v0.1.1`
 - 包名：`com.serenegiant.usbcameratest7`
-- 预发布 APK：`keenon-uvc-multi-probe-v0.2.0-beta.3.apk`
-- 预发布 Release：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/tag/v0.2.0-beta.3>
-- 预发布 APK 下载：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/download/v0.2.0-beta.3/keenon-uvc-multi-probe-v0.2.0-beta.3.apk>
+- 预发布 APK：`keenon-uvc-multi-probe-v0.2.0-beta.4.apk`
+- 预发布 Release：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/tag/v0.2.0-beta.4>
+- 预发布 APK 下载：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/download/v0.2.0-beta.4/keenon-uvc-multi-probe-v0.2.0-beta.4.apk>
 - 稳定版 Release：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/tag/v0.1.1>
 
 ## 核心能力
@@ -124,7 +124,7 @@ http://机器人IP:8080/snapshot/3.jpg
 ## 安装
 
 ```bash
-adb install -r keenon-uvc-multi-probe-v0.2.0-beta.3.apk
+adb install -r keenon-uvc-multi-probe-v0.2.0-beta.4.apk
 adb shell monkey -p com.serenegiant.usbcameratest7 1
 ```
 
@@ -132,7 +132,7 @@ adb shell monkey -p com.serenegiant.usbcameratest7 1
 
 ```bash
 adb uninstall com.serenegiant.usbcameratest7
-adb install -r keenon-uvc-multi-probe-v0.2.0-beta.3.apk
+adb install -r keenon-uvc-multi-probe-v0.2.0-beta.4.apk
 ```
 
 ## 接收端对接说明
