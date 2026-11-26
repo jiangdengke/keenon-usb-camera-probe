@@ -769,3 +769,25 @@
 - `progress.md`: appended the authorized release-preparation record and verification evidence.
 - `.trellis/tasks/11-26-http-camera-logs/prd.md`: recorded follow-up authorization for commit/push/prerelease while continuing to prohibit robot installation or restart.
 - Rollback point: `cc08dd7` retains the tested feature before release-only documentation updates. Revert the release metadata commit with `git revert <release-metadata-commit>` if needed; deleting a published Release or tag requires explicit approval. Keep historical progress entries. No robot changes were performed.
+
+## 2026-11-26 - Task: Verify published beta.5 and document upgrade restriction
+
+### What was done
+- Pushed feature commit `cc08dd7` and release metadata commit `a826bc3` to `origin/main`, together with annotated tag `v0.2.0-beta.5` pointing to `a826bc35c4c0d5ab51a0bcc920fbd5e5fa68bbd8`.
+- Verified successful cloud publication and downloaded the published APK. Updated the public release title/notes with the verified results and an explicit installation restriction discovered during artifact comparison.
+- Documented that the official beta.5 APK cannot replace the official beta.4 APK in place because the signing certificates differ. Did not change signing configuration, replace the published artifact, move the tag, uninstall/install the app, restart the robot or claim that camera loss was fixed.
+
+### Testing
+- GitHub Actions run `45776227135` completed successfully: https://github.com/jiangdengke/keenon-usb-camera-probe/actions/runs/45776227135 . GitHub API confirmed tag `v0.2.0-beta.5`, `draft=false`, `prerelease=true`, and APK asset size 3,022,511 bytes.
+- Reran the compiled production HTTP harness before pushing: all 49 assertions passed. Local Android lint reported 0 errors and 15 warnings, and debug assembly passed.
+- `apkanalyzer apk summary` confirmed package `com.serenegiant.usbcameratest7`, versionCode `33`, versionName `0.2.0-beta.5`; official beta.4 has versionCode `32`.
+- `apksigner verify --print-certs` passed for both downloaded APKs. Beta.4 certificate SHA-256: `cd2018443392cf496f7e73b3e521873f7105cf096a58238aee66d11f4d55b891`; beta.5: `722b0826fab07646fcc61936c9ae92863174ccd7035d44d68da8776e0a751337`. This proves an official beta.4 in-place upgrade is blocked; the actual robot-installed certificate has not been inspected.
+- `shasum -a 256` on downloaded beta.5 matched the GitHub asset digest: `d0d86b0e8007f94fc34c437335d3b63832b05616380be4bb946b19b7d3da1233`.
+- The new `/logs` endpoint still requires a compatible installation for field verification. Resolve signing-key availability before choosing a migration path; do not bypass the mismatch by uninstalling the field app without an approved settings-preservation plan.
+
+### Notes
+- `README.md`: added the verified beta.4-to-beta.5 signature incompatibility and limited the install command to compatible/fresh installations.
+- `docs/eight-camera-probe.md`: added artifact-based installation compatibility evidence and the boundary on robot verification.
+- `progress.md`: appended final publication, artifact checks and installation risk evidence.
+- Public release: https://github.com/jiangdengke/keenon-usb-camera-probe/releases/tag/v0.2.0-beta.5 . The release tag remains at `a826bc3`; this post-publication documentation does not change the released binary.
+- Rollback point: `a826bc3` is the published source state. If these documentation additions must be withdrawn, restore only their additions in a new commit while retaining this historical log; deleting/changing the published tag, asset or Release requires explicit approval. No robot rollback is needed.

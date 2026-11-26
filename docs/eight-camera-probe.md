@@ -94,6 +94,10 @@ Reusing the service snapshot avoids requiring ADB or photos for routine field di
 
 The currently installed app does not gain this endpoint until an APK containing the change is installed. Updating interrupts streaming; verification against an older installed version does not validate `/logs`.
 
+### Beta.5 installation compatibility
+
+The downloaded official `v0.2.0-beta.5` and `v0.2.0-beta.4` APKs have different signing certificates, verified with `apksigner verify --print-certs`. Beta.5 has versionCode 33 versus beta.4's 32, but increasing the version code does not bypass Android's signer requirement. An installation of the official beta.4 APK cannot be updated in place with this beta.5 artifact. The robot's installed certificate has not been read, and no installation was attempted. Check whether the old signing key is available before planning an update; do not uninstall the field app to bypass this conflict, as that loses its settings and interrupts streaming. The existing signing pipeline has not been changed by this release.
+
 ## On-device logs
 
 Use the top-bar `显示日志` button to show the built-in log panel above the preview grid. The same button changes to `隐藏日志` when the panel is visible.
