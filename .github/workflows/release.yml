@@ -86,47 +86,29 @@ jobs:
         run: |
           cat > release/RELEASE_NOTES.md <<EOF
           ## 更新内容
-          - 推流地址可在 App 里修改：顶部新增“推流地址”按钮，输入 ws://接收端IP:端口/ 后保存，立即重连
-          - 推流开关、地址、路数和间隔保存在机器人上，重启、桌面图标和通知栏打开都继续使用；可一键恢复默认
-          - 推流地址对话框新增“测试连接”：做一次 TCP 连接和 WebSocket 握手后断开，不保存也不影响正在推流
-          - 测试结果和推流日志给出中文原因：连接被拒绝、连接超时、网络不通、主机不可达、找不到主机、对方不是 WebSocket 服务
-          - 修复握手失败时连接没有关闭的问题
-          - ADB 推流参数改为保存生效，新增 --ez push_reset true 恢复默认配置
-          - 开机拉起界面改用桌面启动同款 Intent，ADB 带推流参数启动仍能生效
-          - Android 9 及以下开机时先拉起界面，让摄像头以前台身份打开，与手动打开 App 的路径一致
-          - 四路都生成 JPEG 或等待 20 秒后，界面自动退回后台并保留在最近任务，前台服务继续推流
-          - 开机仍同时启动前台推流服务，界面被固件拦截时继续推流；Android 10 及以上只启动服务
-          - Camera2 采集严格对齐 Keenon 官方 CurrencyCameraActivity：按 cameraIdList 顺序打开前 4 路，每路固定一个 640x480 SurfaceTexture 和 TEMPLATE_PREVIEW 单 Surface 请求
-          - 移除后台 JPEG ImageReader 尺寸选择，避免某一路回退到 1920x1080 后无法产出 WebSocket 推流帧
-          - 通过固定 640x480 SurfaceTexture 离屏读回继续生成 HTTP 与 WebSocket 所需 JPEG，不改变 KJPG 协议和四路槽位映射
-          - 新增 Android 前台服务，Camera2、JPEG 生成、HTTP 和 WebSocket 推流不再依赖 Activity 生命周期
-          - App 切换到机器人主页面或其他 App 后继续推流，返回界面时只恢复状态展示，不重复打开摄像头或建立第二个连接
-          - 新增摄像头可用性监听和自动重连，摄像头暂时不可用后可由后台服务重新扫描恢复
-          - 默认使用 Android Camera2/HAL 官方兼容路径打开摄像头，贴近 Keenon 官方 CurrencyCameraActivity 调用方式
-          - 保留 HTTP MJPEG 拉流服务，继续提供 /cameras、/stream/{slot}.mjpeg 和 /snapshot/{slot}.jpg 作为回退验证入口
-          - 默认启用主动 WebSocket 推流，将 4 路 JPEG 通过一个长连接推送到 ws://192.168.112.194:9090/
-          - WebSocket 二进制消息使用 KJPG 头携带 slotIndex、timestamp、sequence、width、height 和 jpegLength，接收端按 slotIndex 区分 4 路
-          - 默认每路 500ms 推送一帧 JPEG，可通过 App 界面或 ADB extra 修改推流开关、目标地址、路数和间隔
+          - v0.2.0-beta.5 新增只读 GET /logs，复用 Camera2 服务现有的最近最多 220 行带时间戳日志，以 UTF-8 纯文本返回；HTTP 首页提供入口
+          - 日志仅保存在内存中，不落盘；读取不清空日志、不记录读取本身，也不触发任何摄像头操作；服务或进程重建后历史丢失
+          - 本次不改摄像头采集、重试、槽位映射或 KJPG 协议，现有摄像头列表、快照和 MJPEG 入口保持不变
+          - 旧 USB/UVC 模式没有服务日志源，访问 /logs 返回 503 Service Unavailable
 
-          ## 验证
-          - GitHub Actions 自动构建 Android debug APK
-          - APK 包含 armeabi-v7a 与 arm64-v8a native 库
-          - 本地已通过 :app:lintDebug 和 :app:assembleDebug
-          - 现场可切换到机器人主页面并保持至少 30 秒，确认 WebSocket 四路 sequence 持续增长且 HTTP /cameras 仍可访问
-          - 现场执行真实重启且不触碰屏幕，确认界面自动退回后台、最近任务可见，且 WebSocket 四路 sequence 持续增长
-          - 本地已用真实推流代码连接本地服务端，确认测试连接的成功、被拒绝、HTTP 非 WebSocket、无握手回应和找不到主机结果
-          - 现场在 App 里保存新地址并重启，确认接收端收到四路画面；连接超时和网络不通结果需在机器人上确认
+          ## 验证与访问
+          - 此前本地 :app:lintDebug 和 :app:assembleDebug 已通过，主机侧 HTTP 验证共 49 项断言通过
+          - 2026-11-26 在机器人旧已安装版本上观察到四路 OPEN、JPEG 计数增长、四路快照可访问；此证据不代表新 /logs 接口已在机器人验证
+          - 安装本版并启动 Camera2 服务后，仍需验证日志入口：http://192.168.3.251:8080/logs
+          - 摄像头状态对照入口：http://192.168.3.251:8080/cameras
 
           ## 预发布说明
-          - 此版本为推流地址保存、界面修改与测试连接的 Beta，仍需在目标机器人上验证保存后重启、开机后四路画面、后台与省电策略
-          - 只支持 ws:// 推流地址，不支持 wss://
-          - 开机时界面会短暂覆盖机器人主页面，并以前台优先级打开摄像头，效果等同于手动打开一次 App
-          - Camera HAL 通常不允许两个 App 同时独占同一摄像头；其他软件占用摄像头时，本服务可能无法打开对应路
+          - 这是只读服务日志功能的 Beta，仅辅助现场诊断，不代表已修复摄像头偶发丢失问题
+          - 接口无鉴权且使用明文 HTTP，仅限可信网络；能访问端口的客户端即可读取日志，不要暴露到公网
+          - 日志仅来自 CameraStreamingService，不是完整 App、Android 系统或其他 App 日志，也无法找回已丢弃的历史
 
           ## 安装
           \`\`\`bash
           adb install -r ${{ steps.artifact.outputs.apk_name }}
           \`\`\`
+          - 沿用既有 debug 签名构建流程，尚未验证与机器人已安装版本的覆盖升级兼容性
+          - 若出现签名或版本冲突等更新失败，请停止安装并返回完整错误供评估；未妥善保留现有推流地址等设置前，不要卸载机器人上的旧 App 来绕过失败
+          - 安装更新会中断推流，请安排合适的安装窗口；本次发版准备未安装或重启机器人
           EOF
 
       - name: Upload workflow artifact

@@ -749,3 +749,23 @@
 - `.trellis/spec/backend/logging-guidelines.md` and `index.md`: recorded and indexed the executable read-only service log contract.
 - `app/build/http-logs-smoke/src/android/util/Log.java` and `src/com/serenegiant/usbcameratest7/HttpLogsSmoke.java`: temporary ignored host test sources; compiled classes and the APK remain build outputs.
 - Rollback point: tracked application and user documentation were clean at `84b0217` before this task. After saving any later edits, restore just the four implementation/documentation paths with `git restore --source=84b0217 -- app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamingService.java README.md docs/eight-camera-probe.md`; rebuild the APK. Retain this appended record, remove only this task's local spec section/index change if rolling back its contract, and leave pre-existing Trellis files untouched. No robot rollback is needed because nothing was installed.
+
+## 2026-11-26 - Task: Prepare v0.2.0-beta.5 prerelease
+
+### What was done
+- The user authorized commit, push and release and selected `v0.2.0-beta.5` as a prerelease. Committed the read-only HTTP logs feature as `cc08dd7` without unrelated local Cursor/Trellis initialization files or scratch build artifacts.
+- Updated current prerelease links and installation guidance, and replaced the prior cumulative release notes with the actual HTTP diagnostics changes and verification limits.
+- Preserved the tag-driven cloud build, CI version numbering and existing signing behavior. Removed the unsafe instruction to automatically uninstall on a signature conflict; upgrading must preserve field settings and be assessed if blocked.
+
+### Testing
+- Reran `./gradlew :app:lintDebug :app:assembleDebug --console=plain` successfully before publication; the application implementation is unchanged since the 49 passing loopback HTTP assertions recorded above.
+- `git diff --check` passed; IDE diagnostics reported no issues for the edited release metadata.
+- Confirmed the prior published prerelease is `v0.2.0-beta.4` and no remote `v0.2.0-beta.5` tag exists before tagging. GitHub Actions completion, published asset metadata and APK inspection remain post-push checks.
+- The new endpoint is not installed on the robot. Four-camera observations in this release's notes are explicitly from the previously installed version, not an on-device validation of `/logs`.
+
+### Notes
+- `README.md`: updated current version, APK links and install examples, with safe upgrade guidance and the new feature's field-verification boundary.
+- `.github/workflows/release.yml`: updated generated Chinese release notes for `/logs` without changing build, signing or version logic.
+- `progress.md`: appended the authorized release-preparation record and verification evidence.
+- `.trellis/tasks/11-26-http-camera-logs/prd.md`: recorded follow-up authorization for commit/push/prerelease while continuing to prohibit robot installation or restart.
+- Rollback point: `cc08dd7` retains the tested feature before release-only documentation updates. Revert the release metadata commit with `git revert <release-metadata-commit>` if needed; deleting a published Release or tag requires explicit approval. Keep historical progress entries. No robot changes were performed.

@@ -10,12 +10,12 @@
 
 ## 当前版本
 
-- 最新预发布版：`v0.2.0-beta.4`（包含推流地址保存、界面修改与测试连接）
+- 最新预发布版：`v0.2.0-beta.5`（新增只读 HTTP 服务日志入口）
 - 最新正式版：`v0.1.1`
 - 包名：`com.serenegiant.usbcameratest7`
-- 预发布 APK：`keenon-uvc-multi-probe-v0.2.0-beta.4.apk`
-- 预发布 Release：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/tag/v0.2.0-beta.4>
-- 预发布 APK 下载：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/download/v0.2.0-beta.4/keenon-uvc-multi-probe-v0.2.0-beta.4.apk>
+- 预发布 APK：`keenon-uvc-multi-probe-v0.2.0-beta.5.apk`
+- 预发布 Release：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/tag/v0.2.0-beta.5>
+- 预发布 APK 下载：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/download/v0.2.0-beta.5/keenon-uvc-multi-probe-v0.2.0-beta.5.apk>
 - 稳定版 Release：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/tag/v0.1.1>
 
 ## 核心能力
@@ -123,33 +123,36 @@ http://机器人IP:8080/snapshot/3.jpg
 
 ### HTTP 服务日志
 
-安装包含此功能的新 APK 并启动 Camera2 服务后，可直接在浏览器打开 `http://192.168.3.251:8080/logs`，或执行：
+安装 `v0.2.0-beta.5` APK 并启动 Camera2 服务后，可直接在浏览器打开 `http://192.168.3.251:8080/logs`，或执行：
 
 ```bash
 curl http://192.168.3.251:8080/logs
 ```
 
 - `GET /logs` 返回带原有时间戳的 UTF-8 纯文本，使用现有 `no-cache` 响应头；HTTP 首页也会列出此入口。
-- 仅包含 `CameraStreamingService` 现有内存缓冲区的最近最多 220 行，不是整个 App、Android 系统或 `BootReceiver` 的完整日志；不落盘，服务或进程重建后历史丢失。
+- 仅包含 `CameraStreamingService` 现有内存缓冲区的最近最多 220 行，不是整个 App、Android 系统或 `BootReceiver` 的完整日志，也不包含其他 App 日志；不落盘，服务或进程重建后历史丢失。
 - 可重复读取，不清空日志、不为读取新增日志，也不打开或重试摄像头，不改变推流状态。
 - 接口没有鉴权且使用明文 HTTP，能访问端口的客户端即可读取日志，仅应在可信网络内使用，不要暴露到公网。
 - 旧 USB/UVC 模式未接入服务日志源，访问 `/logs` 返回 `503 Service Unavailable` 并说明不可用。
 
 此入口复用服务已有的同步日志快照，避免现场依赖 ADB 或拍照，也不新增日志采集器。当前已安装版本不会自动获得此功能，须安装包含本次改动的 APK 后验证；安装更新会中断推流，也无法找回已丢弃的日志。
 
+本次更新不改摄像头采集、重试、槽位映射或 KJPG 协议，只增加诊断入口，不代表已修复摄像头偶发丢失问题。
+
+验证边界：
+
+- 此前本地 `:app:lintDebug` 和 `:app:assembleDebug` 已通过，主机侧 HTTP 验证共 49 项断言通过。
+- 2026-11-26 对机器人旧已安装版本的检查观察到四路 OPEN、JPEG 计数增长且四路快照可访问；这不是新 `/logs` 接口的实机验证。
+- 新 `/logs` 仍须安装后验证，并可通过 `http://192.168.3.251:8080/cameras` 对照摄像头状态。
+
 ## 安装
 
 ```bash
-adb install -r keenon-uvc-multi-probe-v0.2.0-beta.4.apk
+adb install -r keenon-uvc-multi-probe-v0.2.0-beta.5.apk
 adb shell monkey -p com.serenegiant.usbcameratest7 1
 ```
 
-如果签名不一致导致安装失败，先卸载旧包：
-
-```bash
-adb uninstall com.serenegiant.usbcameratest7
-adb install -r keenon-uvc-multi-probe-v0.2.0-beta.4.apk
-```
+当前仍使用既有 debug 签名构建流程，尚未验证与机器人已安装版本的覆盖升级兼容性。若出现签名或版本冲突等更新失败，请停止安装并返回完整错误供评估；未妥善保留现有推流地址等设置前，不要卸载机器人上的旧 App 来绕过失败。更新会中断推流，应安排合适的安装窗口。
 
 ## 接收端对接说明
 
