@@ -78,6 +78,22 @@ For stronger diagnosis, also check the Chinese `强诊断` lines:
 - `自动重试` means the app detected an opened slot with no frame callback and reopened it. Failure after both MJPEG-size and YUYV retries points more to third-party UVC access or driver compatibility limits for that route; YUYV frames with increasing JPEG count indicate MJPEG incompatibility but working HTTP streaming through the YUYV fallback.
 - The `/cameras` endpoint includes `openSequence`, `fpsMin`, `fpsMax`, `fpsFallback`, `bandwidthFactor`, `lowBandwidthMode`, `selectionReason`, `lastFrameAgeMs`, `lastFrameBytes`, and `diagnosis` fields for remote checks. Use `openSequence` to see whether the failed route is always the last opened slot.
 
+## Read-only HTTP service logs
+
+After installing an APK containing this feature and starting the Camera2 service, open `http://192.168.3.251:8080/logs` in a browser or run:
+
+```bash
+curl http://192.168.3.251:8080/logs
+```
+
+`GET /logs` returns `200 OK` with `text/plain; charset=utf-8`, the original timestamps, and the existing `Cache-Control: no-cache` header. The HTTP index advertises `/logs` only when a log source is available. The legacy USB/UVC path has no service log source and returns `503 Service Unavailable` with an explanation.
+
+The response is the existing synchronized `CameraStreamingService` snapshot: at most the last 220 service log lines, held only in memory. It is not the full app, Android system, or `BootReceiver` log. History is lost when the service or process is recreated, and older discarded lines cannot be recovered. Repeated reads do not clear or append logs, open or retry cameras, or change streaming state.
+
+Reusing the service snapshot avoids requiring ADB or photos for routine field diagnosis and avoids introducing a second log collector or persistence. This plain HTTP endpoint is unauthenticated: any client that can reach port 8080 can read these logs. Use it only on a trusted network and do not expose it to the public Internet.
+
+The currently installed app does not gain this endpoint until an APK containing the change is installed. Updating interrupts streaming; verification against an older installed version does not validate `/logs`.
+
 ## On-device logs
 
 Use the top-bar `显示日志` button to show the built-in log panel above the preview grid. The same button changes to `隐藏日志` when the panel is visible.

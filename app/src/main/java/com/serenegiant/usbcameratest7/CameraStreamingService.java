@@ -288,6 +288,11 @@ public final class CameraStreamingService extends Service {
                     public void log(final String message) {
                         CameraStreamingService.this.log(message);
                     }
+                }, new CameraStreamHub.LogSource() {
+                    @Override
+                    public String getRecentLogText() {
+                        return CameraStreamingService.this.getRecentLogText();
+                    }
                 });
             mStreamHub.start();
             configurePushClient();

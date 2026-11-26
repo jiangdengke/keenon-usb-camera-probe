@@ -719,3 +719,33 @@
 - `.github/workflows/release.yml`: added the push address dialog, saved settings and test connection to the release notes, plus the matching verification steps.
 - `progress.md`: appended this release-preparation record.
 - Rollback point: revert this release-preparation commit; if already published, deleting the `v0.2.0-beta.4` Release or tag requires explicit approval.
+
+## 2026-11-26 - Task: Expose recent camera service logs over read-only HTTP
+
+### What was done
+- Added `GET /logs` to the existing port 8080 server so field diagnosis can read service logs without ADB or photographing the robot screen.
+- Reused the service's synchronized, timestamped 220-line in-memory snapshot without adding persistence, a second buffer, read-side logging or camera operations. The legacy UVC caller remains compatible and returns an explicit 503 when no service log source exists.
+- Documented trusted-network-only unauthenticated HTTP access, memory-only retention, app/service log scope and the need to install the new APK before remote verification.
+- Independently checked the currently installed robot through `192.168.3.251:8080`: four camera IDs and growing JPEG counters were present. This does not establish stable physical-camera mapping or resolve the intermittent missing-camera cause.
+
+### Testing
+- `./gradlew :app:lintDebug :app:assembleDebug --console=plain` passed; lint reported 0 errors and 15 warnings. IDE diagnostics for both changed Java files reported no issues.
+- Ran a scratch loopback socket harness against the actual Gradle-compiled `CameraStreamHub`, stubbing only Android `Log`: 49 assertions passed for UTF-8/body length/no-cache, empty and changing snapshots, non-destructive repeated reads, no self-logging, non-GET rejection, absent-source 503, index visibility, camera listing, snapshots and MJPEG output. No testing dependencies were added.
+- Reproduce the host check using `javac -encoding UTF-8 -cp "app/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes:/opt/homebrew/share/android-commandlinetools/platforms/android-34/android.jar" -d "app/build/http-logs-smoke/classes" "app/build/http-logs-smoke/src/android/util/Log.java" "app/build/http-logs-smoke/src/com/serenegiant/usbcameratest7/HttpLogsSmoke.java"` followed by `java -cp "app/build/http-logs-smoke/classes:app/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes:/opt/homebrew/share/android-commandlinetools/platforms/android-34/android.jar" com.serenegiant.usbcameratest7.HttpLogsSmoke`. The scratch sources are ignored build artifacts, not a committed test suite, and are removed by a clean build.
+- At local 15:05:52-15:05:58, the robot's four JPEG counts increased `185->192`, `194->201`, `195->203`, `195->202`; all reported 640x480, and all four snapshots returned HTTP 200 with JPEG start/end markers. The response advertised `192.168.64.10`, but requests to the user-supplied `192.168.3.251` worked.
+- Independent read-only quality review found no introduced defects. `git diff --check` passed.
+- The debug APK was generated at `app/build/outputs/apk/debug/app-debug.apk` (4,952,502 bytes). Manifest inspection confirmed local default versionName `3.00`, versionCode `9`; signing/version compatibility with the installed release has not been verified.
+- No robot update, remote `/logs` verification, system camera-owner inspection, commit, tag or release was performed. An approved installation using compatible version/signing is still needed; do not uninstall the field app to bypass update failures.
+
+### Notes
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java`: added an optional log snapshot source, read-only UTF-8 `/logs` response, no-source 503 and conditional index entry.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamingService.java`: wired the existing synchronized log getter to the HTTP source without changing capture, retry or push behavior.
+- `README.md`: added remote log access instructions, retention/security boundaries and deployment requirements.
+- `docs/eight-camera-probe.md`: documented the service log endpoint and why the existing buffer is reused instead of requiring ADB/photos or another collector.
+- `progress.md`: appended this implementation, remote observation and verification record.
+- `.trellis/tasks/11-26-http-camera-logs/prd.md`: captured user approval, scope, contract, live evidence, acceptance results and remaining deployment checks.
+- `.trellis/tasks/11-26-http-camera-logs/implement.jsonl` and `check.jsonl`: recorded scoped reuse and cross-layer guidance.
+- `.trellis/tasks/11-26-http-camera-logs/task.json`: created the scoped task and activated implementation without archiving or auto-committing.
+- `.trellis/spec/backend/logging-guidelines.md` and `index.md`: recorded and indexed the executable read-only service log contract.
+- `app/build/http-logs-smoke/src/android/util/Log.java` and `src/com/serenegiant/usbcameratest7/HttpLogsSmoke.java`: temporary ignored host test sources; compiled classes and the APK remain build outputs.
+- Rollback point: tracked application and user documentation were clean at `84b0217` before this task. After saving any later edits, restore just the four implementation/documentation paths with `git restore --source=84b0217 -- app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamHub.java app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamingService.java README.md docs/eight-camera-probe.md`; rebuild the APK. Retain this appended record, remove only this task's local spec section/index change if rolling back its contract, and leave pre-existing Trellis files untouched. No robot rollback is needed because nothing was installed.

@@ -30,6 +30,10 @@ final class CameraStreamHub {
         void log(String message);
     }
 
+    interface LogSource {
+        String getRecentLogText();
+    }
+
     private static final String TAG = "KeenonStreamHub";
     private static final int JPEG_QUALITY = 60;
     private static final int MIN_JPEG_INTERVAL_MS = 200;
@@ -42,6 +46,7 @@ final class CameraStreamHub {
     private final SlotState[] mSlots;
     private final int mPort;
     private final LogSink mLogSink;
+    private final LogSource mLogSource;
 
     private ServerSocket mServerSocket;
     private ExecutorService mClientExecutor;
@@ -51,12 +56,18 @@ final class CameraStreamHub {
     private volatile String mBaseUrl;
 
     CameraStreamHub(final int slotCount, final int port, final LogSink logSink) {
+        this(slotCount, port, logSink, null);
+    }
+
+    CameraStreamHub(final int slotCount, final int port, final LogSink logSink,
+        final LogSource logSource) {
         mSlots = new SlotState[slotCount];
         for (int i = 0; i < slotCount; i++) {
             mSlots[i] = new SlotState(i);
         }
         mPort = port;
         mLogSink = logSink;
+        mLogSource = logSource;
         mBaseUrl = "http://" + resolveLocalIpAddress() + ":" + port;
     }
 
@@ -545,6 +556,14 @@ final class CameraStreamHub {
                 sendText(out, "200 OK", "text/plain; charset=utf-8", buildIndexText());
             } else if ("/cameras".equals(path)) {
                 sendText(out, "200 OK", "application/json; charset=utf-8", buildCamerasJson());
+            } else if ("/logs".equals(path)) {
+                if (mLogSource != null) {
+                    sendText(out, "200 OK", "text/plain; charset=utf-8",
+                        mLogSource.getRecentLogText());
+                } else {
+                    sendText(out, "503 Service Unavailable", "text/plain; charset=utf-8",
+                        "Service logs are unavailable in this camera mode.\n");
+                }
             } else if (path.startsWith("/snapshot/")) {
                 handleSnapshot(path, out);
             } else if (path.startsWith("/stream/")) {
@@ -625,6 +644,9 @@ final class CameraStreamHub {
         sb.append("Keenon UVC Multi Probe\n");
         sb.append("Base URL: ").append(mBaseUrl).append("\n");
         sb.append("GET ").append(mBaseUrl).append("/cameras\n");
+        if (mLogSource != null) {
+            sb.append("GET ").append(mBaseUrl).append("/logs\n");
+        }
         for (int i = 0; i < mActiveSlotCount; i++) {
             sb.append("GET ").append(mBaseUrl).append("/stream/").append(i).append(".mjpeg\n");
             sb.append("GET ").append(mBaseUrl).append("/snapshot/").append(i).append(".jpg\n");
