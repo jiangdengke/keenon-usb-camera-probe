@@ -10,12 +10,12 @@
 
 ## 当前版本
 
-- 最新预发布版：`v0.2.0-beta.5`（新增只读 HTTP 服务日志入口）
+- 最新预发布版：`v0.2.0-beta.6`（修复相机失败资源释放、重复打开与重试干扰，包含 HTTP 日志）
 - 最新正式版：`v0.1.1`
 - 包名：`com.serenegiant.usbcameratest7`
-- 预发布 APK：`keenon-uvc-multi-probe-v0.2.0-beta.5.apk`
-- 预发布 Release：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/tag/v0.2.0-beta.5>
-- 预发布 APK 下载：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/download/v0.2.0-beta.5/keenon-uvc-multi-probe-v0.2.0-beta.5.apk>
+- 预发布 APK：`keenon-uvc-multi-probe-v0.2.0-beta.6.apk`
+- 预发布 Release：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/tag/v0.2.0-beta.6>
+- 预发布 APK 下载：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/download/v0.2.0-beta.6/keenon-uvc-multi-probe-v0.2.0-beta.6.apk>
 - 稳定版 Release：<https://github.com/jiangdengke/keenon-usb-camera-probe/releases/tag/v0.1.1>
 
 ## 核心能力
@@ -123,7 +123,7 @@ http://机器人IP:8080/snapshot/3.jpg
 
 ### HTTP 服务日志
 
-安装 `v0.2.0-beta.5` APK 并启动 Camera2 服务后，可直接在浏览器打开 `http://192.168.3.251:8080/logs`，或执行：
+安装 `v0.2.0-beta.5` 或后续版本并启动 Camera2 服务后，可直接在浏览器打开 `http://192.168.3.251:8080/logs`，或执行：
 
 ```bash
 curl http://192.168.3.251:8080/logs
@@ -137,7 +137,7 @@ curl http://192.168.3.251:8080/logs
 
 此入口复用服务已有的同步日志快照，避免现场依赖 ADB 或拍照，也不新增日志采集器。当前已安装版本不会自动获得此功能，须安装包含本次改动的 APK 后验证；安装更新会中断推流，也无法找回已丢弃的日志。
 
-本次更新不改摄像头采集、重试、槽位映射或 KJPG 协议，只增加诊断入口，不代表已修复摄像头偶发丢失问题。
+beta.5 只增加诊断入口；beta.6 在此基础上修复相机资源释放与重试。两者均未改变官方采集参数或 KJPG 协议，现场偶发故障的原因和恢复效果仍需实机验证。
 
 验证边界：
 
@@ -147,16 +147,16 @@ curl http://192.168.3.251:8080/logs
 
 ## 安装
 
-**升级限制（已核验）：官方 `v0.2.0-beta.5` 与 `v0.2.0-beta.4` APK 的签名证书不同。若机器人安装的是官方 beta.4，不能直接用下方命令覆盖升级。请先确认能否取得旧版签名密钥；不要直接卸载旧 App，以免丢失推流地址等配置并中断现场推流。**
+**升级限制：已核验官方 beta.5 与 beta.4 的签名证书不同。本版仍沿用原有 debug 签名流程，不保证能覆盖旧版；安装前须核对签名或确认旧版签名密钥是否保留。不要直接卸载旧 App，以免丢失推流地址等配置并中断现场推流。**
 
 以下命令仅适用于首次安装或已确认签名兼容的设备：
 
 ```bash
-adb install -r keenon-uvc-multi-probe-v0.2.0-beta.5.apk
+adb install -r keenon-uvc-multi-probe-v0.2.0-beta.6.apk
 adb shell monkey -p com.serenegiant.usbcameratest7 1
 ```
 
-当前仍使用既有 debug 签名构建流程，未读取机器人已安装包的证书，也未执行安装。beta.5 的 `versionCode` 为 `33`，高于 beta.4 的 `32`，但版本递增不能解决签名冲突。若更新失败，请停止安装并返回完整错误供评估。更新会中断推流，应安排合适的安装窗口。
+未读取机器人已安装包的证书，也未执行安装。版本号由发布标签和 CI 构建序号生成，但版本递增不能解决签名冲突。若更新失败，请停止安装并返回完整错误供评估。更新会中断推流，应安排合适的安装窗口。
 
 ## 接收端对接说明
 
@@ -335,7 +335,7 @@ http://机器人IP:8080/stream/3.mjpeg
 
 `The camera device is in use already` 表示相机服务拒绝了这次操作，但不能仅凭这句话确认是其他 App 占用。`Bad argument passed to camera service` 也不能单独证明 640x480 或官方单 Surface 配置不兼容；需要结合日志中的失败阶段、cameraId 和错误码判断。
 
-当前开发中的恢复修复（尚未发布或安装到机器人）针对三个已确认的代码缺陷：失败回调先于打开成功时漏关回调对象、列表变化时新槽位可能打开仍被旧槽位持有的 cameraId，以及全局扫描通知打乱失败重试间隔。修复保持官方采集参数不变，并增加失败阶段与退避日志。它不能强行抢占其他 App 的摄像头，也不等于已经确认本次现场故障的根因。
+`v0.2.0-beta.6` 的恢复修复针对三个已确认的代码缺陷：失败回调先于打开成功时漏关回调对象、列表变化时新槽位可能打开仍被旧槽位持有的 cameraId，以及全局扫描通知打乱失败重试间隔。修复保持官方采集参数不变，并增加失败阶段与退避日志。它不能强行抢占其他 App 的摄像头，也不等于已经确认本次现场故障的根因；尚未安装到机器人验证。
 
 遇到故障时优先保留现场：记录 `/cameras`，安装支持日志的版本后同时保存 `/logs`，再决定是否关闭或重启。两者都是本 App 的状态，不是系统相机所有权记录；`slot=0` 也不是稳定的物理摄像头身份。服务重建会丢失内存日志。现场升级前还需处理上文的签名兼容问题，不要直接卸载旧 App 来绕过。
 

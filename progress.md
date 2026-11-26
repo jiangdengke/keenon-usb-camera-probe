@@ -817,3 +817,23 @@
 - `.trellis/tasks/11-26-camera2-error-recovery/`: recorded evidence, scoped requirements and curated review context. `.trellis/spec/backend/error-handling.md` and `index.md`: recorded the executable ownership/shutdown contract. Local Trellis remains untracked initialization and was not archived or auto-committed.
 - A HAL that never completes an open/close callback keeps that ID reserved; shutdown may retain its callback thread/resources. No unsafe forced reopen is used. The controller is per service instance, not a system-wide ownership lock. Other apps and HAL failures may still prevent acquisition.
 - Rollback baseline: `0412914`. After preserving any subsequent edits, remove only this task's service/documentation changes and newly added controller/test files; retain historical progress and unrelated local tooling. No published version or robot rollback is necessary because this fix is not deployed.
+
+## 2026-11-26 - Task: Prepare v0.2.0-beta.6 prerelease
+
+### What was done
+- The user authorized commit/push/release and selected prerelease `v0.2.0-beta.6`. Committed the verified Camera2 recovery fix and host regression suite as `8f8ce4d`, excluding unrelated local Cursor/Trellis initialization.
+- Updated current release links, recovery version labels and generated Chinese notes for the actual fix, retaining the 640x480 single-Surface capture contract and explicit field-validation limitations.
+- Kept existing build/signing/version resolution unchanged; release title now uses the exact tag. Installation remains conditional on signature compatibility, and no robot action is included in this release task.
+
+### Testing
+- Reran `bash app/src/testHost/run-camera-recovery-tests.sh`: 89 assertions passed. Reran `./gradlew :app:lintDebug :app:assembleDebug --console=plain`: passed, with 0 lint errors and 15 warnings.
+- Reran the existing production HTTP scratch harness: all 49 assertions passed. IDE diagnostics reported no issues for release metadata and the changed production Java files.
+- Verified `origin/main` matched baseline `0412914` before publication and no remote beta.6 tag existed. Cloud publication and downloaded APK checks remain post-push verification, not assumed successful here.
+
+### Notes
+- `README.md`: updated beta.6 links/install example and distinguished the recovery fix from beta.5's log-only feature.
+- `docs/eight-camera-probe.md`: associated the documented recovery contract with beta.6 instead of an unreleased working tree.
+- `.github/workflows/release.yml`: updated Chinese notes and exact-tag release title, without changing signing or build jobs.
+- `progress.md`: appended release preparation and repeatable verification evidence.
+- `.trellis/tasks/11-26-camera2-error-recovery/prd.md`: recorded follow-up release authorization; remains local tooling, excluded from commits.
+- Rollback point: `8f8ce4d` contains the tested fix before release metadata. Revert the release metadata commit if necessary; deleting/changing a published tag, APK or Release requires explicit approval. Preserve historical progress. No robot rollback is needed.

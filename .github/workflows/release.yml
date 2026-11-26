@@ -85,30 +85,39 @@ jobs:
       - name: Write release notes
         run: |
           cat > release/RELEASE_NOTES.md <<EOF
+          ## 安装前注意
+          - 本版沿用原有 debug 签名构建流程，不保证可覆盖旧版；此前已确认官方 beta.5 与 beta.4 签名不同
+          - 安装前核对签名或确认旧版签名密钥是否保留；不要直接卸载旧 App 绕过失败，以免丢失推流配置并中断现场推流
+
           ## 更新内容
-          - v0.2.0-beta.5 新增只读 GET /logs，复用 Camera2 服务现有的最近最多 220 行带时间戳日志，以 UTF-8 纯文本返回；HTTP 首页提供入口
-          - 日志仅保存在内存中，不落盘；读取不清空日志、不记录读取本身，也不触发任何摄像头操作；服务或进程重建后历史丢失
-          - 本次不改摄像头采集、重试、槽位映射或 KJPG 协议，现有摄像头列表、快照和 MJPEG 入口保持不变
-          - 旧 USB/UVC 模式没有服务日志源，访问 /logs 返回 503 Service Unavailable
+          - 修复相机尚未打开成功就收到失败或断开回调时，回调设备对象未关闭的问题
+          - 列表变化时先关闭所有被替换的旧连接，再申请新连接；同一 cameraId 等待旧连接关闭确认，避免应用内部重复打开
+          - 按 cameraId 独立退避重试，间隔从 1.5 秒递增至最多 30 秒；其他相机通知或重复启动请求不再绕过等待
+          - 修复扫描异常后失去恢复机会、停止时过早结束回调线程等问题；旧回调不影响新连接
+          - 日志增加失败阶段、cameraId、尝试序号、异常原因和重试间隔，枚举变化时记录完整 ID 列表
+          - 保留官方 640x480、单 SurfaceTexture、TEMPLATE_PREVIEW 和原 KJPG 协议，正常路不重复打开
+          - 包含 beta.5 的只读 GET /logs，读取现有最近最多 220 行服务内存日志；旧 USB/UVC 模式无日志源时返回 503
 
           ## 验证与访问
-          - 此前本地 :app:lintDebug 和 :app:assembleDebug 已通过，主机侧 HTTP 验证共 49 项断言通过
-          - 2026-11-26 在机器人旧已安装版本上观察到四路 OPEN、JPEG 计数增长、四路快照可访问；此证据不代表新 /logs 接口已在机器人验证
-          - 安装本版并启动 Camera2 服务后，仍需验证日志入口：http://192.168.3.251:8080/logs
+          - 本地 :app:lintDebug 和 :app:assembleDebug 已通过；Lint 为 0 错误、15 个警告
+          - 生产恢复策略的 89 项主机断言通过，原有 HTTP 日志、快照和流接口的 49 项检查通过
+          - 主机检查不执行真实 Handler、CameraManager 或 EGL；独立代码复查通过，修复效果仍需机器人验证
+          - 解决安装兼容性后，启动服务并保存日志：http://192.168.3.251:8080/logs
           - 摄像头状态对照入口：http://192.168.3.251:8080/cameras
 
           ## 预发布说明
-          - 这是只读服务日志功能的 Beta，仅辅助现场诊断，不代表已修复摄像头偶发丢失问题
+          - 本版修复已确认的应用缺陷，不代表已证明现场四路失败的唯一原因；没有安装或重启机器人
+          - 不能强行抢占其他 App 的摄像头；若 HAL 永远不返回打开或关闭回调，对应 ID 会保持等待，停止时也可能保留回调线程
+          - 路号仍按枚举顺序排列，不代表稳定物理摄像头身份
           - 接口无鉴权且使用明文 HTTP，仅限可信网络；能访问端口的客户端即可读取日志，不要暴露到公网
-          - 日志仅来自 CameraStreamingService，不是完整 App、Android 系统或其他 App 日志，也无法找回已丢弃的历史
+          - 日志仅来自 CameraStreamingService，不是系统或其他 App 日志；服务重建后历史丢失
 
           ## 安装
+          仅适用于首次安装或已确认签名兼容的设备：
           \`\`\`bash
           adb install -r ${{ steps.artifact.outputs.apk_name }}
           \`\`\`
-          - 沿用既有 debug 签名构建流程，尚未验证与机器人已安装版本的覆盖升级兼容性
-          - 若出现签名或版本冲突等更新失败，请停止安装并返回完整错误供评估；未妥善保留现有推流地址等设置前，不要卸载机器人上的旧 App 来绕过失败
-          - 安装更新会中断推流，请安排合适的安装窗口；本次发版准备未安装或重启机器人
+          - 若更新失败，请停止并返回完整错误；版本递增不能绕过签名冲突
           EOF
 
       - name: Upload workflow artifact
@@ -121,7 +130,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          name: Keenon UVC Multi Probe ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           body_path: release/RELEASE_NOTES.md
           files: release/*.apk
           prerelease: ${{ contains(github.ref_name, '-') }}

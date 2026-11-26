@@ -98,9 +98,9 @@ The currently installed app does not gain this endpoint until an APK containing 
 
 The downloaded official `v0.2.0-beta.5` and `v0.2.0-beta.4` APKs have different signing certificates, verified with `apksigner verify --print-certs`. Beta.5 has versionCode 33 versus beta.4's 32, but increasing the version code does not bypass Android's signer requirement. An installation of the official beta.4 APK cannot be updated in place with this beta.5 artifact. The robot's installed certificate has not been read, and no installation was attempted. Check whether the old signing key is available before planning an update; do not uninstall the field app to bypass this conflict, as that loses its settings and interrupts streaming. The existing signing pipeline has not been changed by this release.
 
-## Camera2 failure recovery (unreleased)
+## Camera2 failure recovery (v0.2.0-beta.6)
 
-The current working-tree fix closes devices supplied by error/disconnect callbacks even before `onOpened`. Each submitted open reserves its camera ID until `onClosed`; cancelling a pending open does not permit another open of that ID. Enumeration changes retire all displaced owners before acquiring replacements. Positional slots still follow enumeration order and are not stable physical-camera identities.
+The beta.6 fix closes devices supplied by error/disconnect callbacks even before `onOpened`. Each submitted open reserves its camera ID until `onClosed`; cancelling a pending open does not permit another open of that ID. Enumeration changes retire all displaced owners before acquiring replacements. Positional slots still follow enumeration order and are not stable physical-camera identities.
 
 Failures use independent per-ID retry delays of 1.5, 3, 6, 12, 24 and at most 30 seconds, using monotonic uptime. Availability notifications and Activity refreshes may request a scan but cannot bypass a failed ID's delay. Only the first actual JPEG resets its failure history; open/session success alone does not. Transient enumeration failures have their own retry window. Healthy matching slots remain untouched. Capture stays at one 640x480 SurfaceTexture and one TEMPLATE_PREVIEW target.
 
