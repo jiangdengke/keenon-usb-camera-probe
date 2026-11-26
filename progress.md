@@ -791,3 +791,29 @@
 - `progress.md`: appended final publication, artifact checks and installation risk evidence.
 - Public release: https://github.com/jiangdengke/keenon-usb-camera-probe/releases/tag/v0.2.0-beta.5 . The release tag remains at `a826bc3`; this post-publication documentation does not change the released binary.
 - Rollback point: `a826bc3` is the published source state. If these documentation additions must be withdrawn, restore only their additions in a new commit while retaining this historical log; deleting/changing the published tag, asset or Release requires explicit approval. No robot rollback is needed.
+
+## 2026-11-26 - Task: Repair Camera2 error cleanup and bounded recovery
+
+### What was done
+- The user supplied a photo of the pre-logs installed version: three slots report `The camera device is in use already`, and the fourth reports `Bad argument passed to camera service`. Two read-only HTTP `/cameras` requests confirmed the same failures with no cached JPEGs. Neither identifies another app's ownership or establishes which failure path occurred.
+- Confirmed and repaired failure-before-onOpened cleanup, positional enumeration collisions and globally coupled retry timing. The beta.4-to-baseline service diff contains only the earlier five-line logs wiring, so these defects also exist in the prior release source; installed artifact identity itself was not inspected.
+- Added a camera-handler-confined production controller for per-ID attempt ownership, stale-callback closure, 1.5-to-30-second bounded retry and earliest-scan/enumeration scheduling. Retired pending/closing attempts retain their ID until onClosed. Synchronous failed opens release unacquired reservations, while any queued stale callback still closes its own object.
+- Reconciliation retires all displaced slots before acquiring replacements. Healthy matching slots are retained. Real JPEG output resets backoff; availability and repeated service starts cannot bypass another ID's cooldown. Capture remains one 640x480 SurfaceTexture and TEMPLATE_PREVIEW target, with the existing HTTP/KJPG transport.
+- Added failure-stage/exception/reason/ID/attempt/retry evidence and enumeration-list change logs. Deferred submitted Surface release until close confirmation. Shutdown keeps the callback thread until pending owners close and requires handler-side stop initialization before quitting.
+- Independent review found a last-onClosed/main-thread-stop race in the first draft. Fixed it by requiring controller.stop() before canFinishShutdown(), after availability unregistration; handled a rejected cleanup post and added regression checks. Follow-up review found no remaining concrete introduced blocker.
+
+### Testing
+- `bash app/src/testHost/run-camera-recovery-tests.sh`: PASS, 89 assertions across 11 focused scenarios. It compiles the real production controller with fake devices and no new dependencies. Covers pre-open failure, pending cancellation, stale callbacks, ID shift ownership, retry isolation/cap/JPEG reset, enumeration deadlines and stop ordering.
+- `./gradlew :app:lintDebug :app:assembleDebug --console=plain` passed after the final Java changes. Lint: 0 errors, 15 warnings. Local APK remains `app/build/outputs/apk/debug/app-debug.apk`, with unchanged local default version/signing settings; it is not a published update.
+- Reran the previous scratch host HTTP harness against the compiled production hub: all 49 assertions passed, including logs, camera listing, snapshots and MJPEG. This scratch harness remains ignored build output, unlike the new committed-source candidate recovery tests.
+- Source review confirms the official capture configuration is unchanged. The host tests do not execute Android Handler, CameraManager, service remapping or EGL; those integrations were reviewed, not exercised on hardware. IDE ReadLints was unavailable in this session; Android lint was used instead.
+- No robot controls, ADB, installation, shutdown/reboot, package/signing changes, commit, push, tag or release were performed. The actual fault cause and target-device recovery are still unproven. Official beta.4/beta.5 signer incompatibility remains a separate deployment blocker.
+
+### Notes and limitations
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraStreamingService.java`: integrated guarded ownership, two-phase reconciliation, bounded retry, error-stage logs and callback-safe teardown.
+- `app/src/main/java/com/serenegiant/usbcameratest7/CameraRecoveryController.java`: added the testable handler-confined ownership and deadline policy.
+- `app/src/testHost/com/serenegiant/usbcameratest7/CameraRecoveryControllerTest.java` and `app/src/testHost/run-camera-recovery-tests.sh`: reproducible dependency-free policy regression suite.
+- `README.md` and `docs/eight-camera-probe.md`: documented unreleased recovery behavior, error interpretation, commands and field-validation/upgrade limits.
+- `.trellis/tasks/11-26-camera2-error-recovery/`: recorded evidence, scoped requirements and curated review context. `.trellis/spec/backend/error-handling.md` and `index.md`: recorded the executable ownership/shutdown contract. Local Trellis remains untracked initialization and was not archived or auto-committed.
+- A HAL that never completes an open/close callback keeps that ID reserved; shutdown may retain its callback thread/resources. No unsafe forced reopen is used. The controller is per service instance, not a system-wide ownership lock. Other apps and HAL failures may still prevent acquisition.
+- Rollback baseline: `0412914`. After preserving any subsequent edits, remove only this task's service/documentation changes and newly added controller/test files; retain historical progress and unrelated local tooling. No published version or robot rollback is necessary because this fix is not deployed.

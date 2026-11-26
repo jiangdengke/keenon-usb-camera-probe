@@ -20,6 +20,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.Surface;
 
@@ -57,7 +58,6 @@ public final class CameraStreamingService extends Service {
     private static final int TARGET_WIDTH = 640;
     private static final int TARGET_HEIGHT = 480;
     private static final int MAX_LOG_LINES = 220;
-    private static final int CAMERA_RECONNECT_DELAY_MS = 1500;
     private static final int SURFACE_READBACK_JPEG_QUALITY = 60;
 
     private final LocalBinder mBinder = new LocalBinder();
@@ -65,16 +65,30 @@ public final class CameraStreamingService extends Service {
     private final Object mLogLock = new Object();
     private final List<String> mLogLines = new ArrayList<String>();
     private final CameraSlotState[] mCameraSlots = new CameraSlotState[MAX_CAMERA_SLOTS];
+    private final CameraRecoveryController<CameraDevice> mCameraRecovery =
+        new CameraRecoveryController<CameraDevice>(
+            new CameraRecoveryController.DeviceCloser<CameraDevice>() {
+                @Override
+                public void close(final CameraDevice cameraDevice) {
+                    try {
+                        cameraDevice.close();
+                    } catch (final RuntimeException exception) {
+                        log("Camera2关闭异常，cameraId=" + cameraDevice.getId()
+                            + "，等待关闭确认，不重复打开：" + describeCameraException(exception));
+                    }
+                }
+            });
 
-    private HandlerThread mCameraThread;
-    private Handler mCameraHandler;
+    private volatile HandlerThread mCameraThread;
+    private volatile Handler mCameraHandler;
     private CameraManager mCameraManager;
     private CameraSurfaceFrameReader mSurfaceFrameReader;
     private CameraStreamHub mStreamHub;
     private CameraPushClient mPushClient;
     private volatile boolean mStreamingStarted;
     private volatile int mActiveSlotCount;
-    private int mCameraSlotLimit = DEFAULT_CAMERA_SLOT_COUNT;
+    private volatile int mCameraSlotLimit = DEFAULT_CAMERA_SLOT_COUNT;
+    private String mLastCameraEnumeration;
     private boolean mPushEnabled = PushSettings.DEFAULT_ENABLED;
     private String mPushTargetUrl = PushSettings.DEFAULT_TARGET_URL;
     private int mPushSlotCount = PushSettings.DEFAULT_SLOT_COUNT;
@@ -83,6 +97,7 @@ public final class CameraStreamingService extends Service {
     private final Runnable mCameraReconcileRunnable = new Runnable() {
         @Override
         public void run() {
+            mCameraRecovery.onScanStarted();
             reconcileCameraSlots();
         }
     };
@@ -344,30 +359,61 @@ public final class CameraStreamingService extends Service {
     private void scheduleCameraReconcile(final long delayMs) {
         final Handler cameraHandler = mCameraHandler;
         if (!mStreamingStarted || cameraHandler == null) return;
-        cameraHandler.removeCallbacks(mCameraReconcileRunnable);
-        cameraHandler.postDelayed(mCameraReconcileRunnable, Math.max(0, delayMs));
+        if (Thread.currentThread() != mCameraThread) {
+            cameraHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    scheduleCameraReconcile(delayMs);
+                }
+            });
+            return;
+        }
+        if (mCameraRecovery.requestScan(SystemClock.uptimeMillis(), delayMs)) {
+            cameraHandler.removeCallbacks(mCameraReconcileRunnable);
+            cameraHandler.postAtTime(mCameraReconcileRunnable,
+                mCameraRecovery.scheduledScanAtMs());
+        }
     }
 
     @SuppressLint("MissingPermission")
     private void reconcileCameraSlots() {
         if (!mStreamingStarted) return;
+        final long enumerationDelay = mCameraRecovery.enumerationDelay(SystemClock.uptimeMillis());
+        if (enumerationDelay > 0) {
+            scheduleCameraReconcile(enumerationDelay);
+            return;
+        }
+        if (!hasCameraPermission()) {
+            log("Camera2后台扫描已暂停：缺少CAMERA权限，请返回App授权");
+            return;
+        }
         if (mCameraManager == null) {
             log("Camera2扫描失败：CameraManager为空");
             return;
         }
         try {
             final String[] cameraIds = mCameraManager.getCameraIdList();
+            mCameraRecovery.onEnumerationSuccess();
             final int desiredSlotCount = Math.min(cameraIds.length, mCameraSlotLimit);
-            for (int slotIndex = desiredSlotCount; slotIndex < mActiveSlotCount; slotIndex++) {
-                closeCameraSlot(mCameraSlots[slotIndex], "CLOSED");
+            // Retire every displaced owner before acquiring any replacement ID.
+            for (int slotIndex = 0; slotIndex < mCameraSlots.length; slotIndex++) {
+                final CameraSlotState slot = mCameraSlots[slotIndex];
+                if (slotIndex >= desiredSlotCount
+                    || (slot.cameraAttempt != null && !cameraIds[slotIndex].equals(slot.cameraId))) {
+                    closeCameraSlot(slot, "CLOSED");
+                }
             }
             mActiveSlotCount = desiredSlotCount;
             if (mStreamHub != null) {
                 mStreamHub.setActiveSlotCount(mActiveSlotCount);
             }
-            log("Camera2后台扫描结果：cameraId数量=" + cameraIds.length
-                + "，本轮打开=" + mActiveSlotCount);
-            updateForegroundNotification("正在推送 " + mActiveSlotCount + " 路摄像头");
+            final String enumeration = Arrays.toString(cameraIds) + "/limit=" + mCameraSlotLimit;
+            if (!enumeration.equals(mLastCameraEnumeration)) {
+                mLastCameraEnumeration = enumeration;
+                log("Camera2后台扫描结果：cameraIds=" + Arrays.toString(cameraIds)
+                    + "，本轮打开=" + mActiveSlotCount);
+                updateForegroundNotification("正在推送 " + mActiveSlotCount + " 路摄像头");
+            }
             for (int slotIndex = 0; slotIndex < mActiveSlotCount; slotIndex++) {
                 final CameraSlotState slot = mCameraSlots[slotIndex];
                 final String cameraId = cameraIds[slotIndex];
@@ -375,23 +421,41 @@ public final class CameraStreamingService extends Service {
                 final boolean activeCamera = "OPENING".equals(slot.status)
                     || "OPEN".equals(slot.status) || "STREAMING".equals(slot.status);
                 if (!matchingCamera || !activeCamera) {
-                    openCameraSlot(slot, cameraId);
+                    final long retryDelay = mCameraRecovery.retryDelay(cameraId,
+                        SystemClock.uptimeMillis());
+                    if (retryDelay > 0) {
+                        scheduleCameraReconcile(retryDelay);
+                    } else if (!mCameraRecovery.ownsCamera(cameraId)) {
+                        openCameraSlot(slot, cameraId);
+                    }
                 }
             }
         } catch (final SecurityException securityException) {
-            log("Camera2后台扫描失败：CAMERA权限不可用");
+            scheduleEnumerationRetry(securityException);
         } catch (final CameraAccessException cameraAccessException) {
-            log("Camera2后台扫描失败：" + cameraAccessException.getMessage());
+            scheduleEnumerationRetry(cameraAccessException);
         }
+    }
+
+    private void scheduleEnumerationRetry(final Exception exception) {
+        final long retryDelay = mCameraRecovery.onEnumerationFailure(SystemClock.uptimeMillis());
+        log("Camera2后台扫描失败，stage=enumerate，" + describeCameraException(exception)
+            + "，重试等待=" + retryDelay + "ms");
+        scheduleCameraReconcile(retryDelay);
     }
 
     @SuppressLint("MissingPermission")
     private void openCameraSlot(final CameraSlotState slot, final String cameraId) {
         closeCameraSlot(slot, "CLOSED");
+        final CameraRecoveryController.Attempt<CameraDevice> attempt =
+            mCameraRecovery.beginAttempt(cameraId, SystemClock.uptimeMillis());
+        if (attempt == null) return;
+        slot.cameraAttempt = attempt;
         final long openGeneration = ++slot.openGeneration;
         slot.cameraId = cameraId;
         slot.status = "OPENING";
         slot.resetFrameMetrics();
+        String failureStage = "createSurface";
         try {
             slot.width = TARGET_WIDTH;
             slot.height = TARGET_HEIGHT;
@@ -424,6 +488,7 @@ public final class CameraStreamingService extends Service {
                     }
                     slot.jpegFrameCount++;
                     if (slot.jpegFrameCount == 1) {
+                        mCameraRecovery.onFirstJpeg(attempt);
                         log("Camera2后台：第" + (slot.slotIndex + 1)
                             + "路官方640x480 Surface首帧JPEG已生成，大小="
                             + jpegData.length + "字节");
@@ -442,12 +507,15 @@ public final class CameraStreamingService extends Service {
             });
             slot.frameTarget = frameTarget;
             log("Camera2后台：准备打开第" + (slot.slotIndex + 1) + "路，cameraId="
-                + cameraId + "，官方SurfaceTexture=" + TARGET_WIDTH + "x" + TARGET_HEIGHT);
+                + cameraId + "，attempt=" + attempt.sequence
+                + "，官方SurfaceTexture=" + TARGET_WIDTH + "x" + TARGET_HEIGHT);
+            failureStage = "openCamera";
             mCameraManager.openCamera(cameraId, new CameraDevice.StateCallback() {
                 @Override
                 public void onOpened(final CameraDevice cameraDevice) {
+                    if (!mCameraRecovery.receiveDevice(attempt, cameraDevice)) return;
                     if (!isCurrentGeneration(slot, cameraId, openGeneration)) {
-                        cameraDevice.close();
+                        mCameraRecovery.retire(attempt);
                         return;
                     }
                     slot.cameraDevice = cameraDevice;
@@ -459,37 +527,61 @@ public final class CameraStreamingService extends Service {
 
                 @Override
                 public void onDisconnected(final CameraDevice cameraDevice) {
+                    if (!mCameraRecovery.receiveDevice(attempt, cameraDevice)) return;
                     if (!isCurrentGeneration(slot, cameraId, openGeneration)) {
-                        cameraDevice.close();
+                        mCameraRecovery.retire(attempt);
                         return;
                     }
-                    log("Camera2后台：第" + (slot.slotIndex + 1)
-                        + "路已断开，cameraId=" + cameraId);
-                    closeCameraSlot(slot, "DISCONNECTED");
-                    scheduleCameraReconcile(CAMERA_RECONNECT_DELAY_MS);
+                    failCameraSlot(slot, attempt, "onDisconnected", "设备已断开");
                 }
 
                 @Override
                 public void onError(final CameraDevice cameraDevice, final int error) {
+                    if (!mCameraRecovery.receiveDevice(attempt, cameraDevice)) return;
                     if (!isCurrentGeneration(slot, cameraId, openGeneration)) {
-                        cameraDevice.close();
+                        mCameraRecovery.retire(attempt);
                         return;
                     }
-                    log("Camera2后台：第" + (slot.slotIndex + 1)
-                        + "路打开错误，cameraId=" + cameraId + "，error=" + error);
-                    closeCameraSlot(slot, "OPEN FAILED: Camera2 error=" + error);
-                    scheduleCameraReconcile(CAMERA_RECONNECT_DELAY_MS);
+                    failCameraSlot(slot, attempt, "onError", "callbackError=" + error);
                 }
-            }, null);
-        } catch (final SecurityException securityException) {
-            log("Camera2后台：第" + (slot.slotIndex + 1) + "路打开失败，无Camera权限");
-            closeCameraSlot(slot, "OPEN FAILED: 无Camera权限");
+
+                @Override
+                public void onClosed(final CameraDevice cameraDevice) {
+                    final boolean wasCurrent = isCurrentGeneration(slot, cameraId, openGeneration);
+                    mCameraRecovery.onClosed(attempt, cameraDevice);
+                    releaseFrameTarget(frameTarget);
+                    if (wasCurrent) {
+                        failCameraSlot(slot, attempt, "onClosed", "设备意外关闭");
+                    }
+                    log("Camera2关闭已确认，cameraId=" + cameraId + "，attempt=" + attempt.sequence);
+                    scheduleCameraReconcile(0);
+                    finishCameraShutdownIfIdle();
+                }
+            }, mCameraHandler);
         } catch (final Exception exception) {
-            log("Camera2后台：第" + (slot.slotIndex + 1)
-                + "路打开异常：" + exception.getMessage());
-            closeCameraSlot(slot, "OPEN FAILED: " + exception.getMessage());
-            scheduleCameraReconcile(CAMERA_RECONNECT_DELAY_MS);
+            final CameraSurfaceFrameReader.FrameTarget failedTarget = slot.frameTarget;
+            mCameraRecovery.onSynchronousOpenFailure(attempt);
+            failCameraSlot(slot, attempt, failureStage, describeCameraException(exception));
+            releaseFrameTarget(failedTarget);
         }
+    }
+
+    private void failCameraSlot(final CameraSlotState slot,
+        final CameraRecoveryController.Attempt<CameraDevice> attempt,
+        final String stage, final String reason) {
+        if (attempt == null || slot.cameraAttempt != attempt) return;
+        final long retryDelay = mCameraRecovery.recordFailure(attempt, SystemClock.uptimeMillis());
+        log("Camera2失败：第" + (slot.slotIndex + 1) + "路，cameraId=" + attempt.cameraId
+            + "，attempt=" + attempt.sequence + "，stage=" + stage + "，" + reason
+            + "，重试等待=" + retryDelay + "ms");
+        closeCameraSlot(slot, "OPEN FAILED: " + stage + " " + reason);
+        scheduleCameraReconcile(retryDelay);
+    }
+
+    private static String describeCameraException(final Exception exception) {
+        final String reason = exception instanceof CameraAccessException
+            ? "，reason=" + ((CameraAccessException)exception).getReason() : "";
+        return exception.getClass().getSimpleName() + reason + ": " + exception.getMessage();
     }
 
     private CameraSurfaceFrameReader getOrCreateSurfaceFrameReader() {
@@ -507,7 +599,8 @@ public final class CameraStreamingService extends Service {
     private boolean isCurrentGeneration(final CameraSlotState slot, final String cameraId,
         final long openGeneration) {
         return mStreamingStarted && slot.openGeneration == openGeneration
-            && cameraId != null && cameraId.equals(slot.cameraId);
+            && cameraId != null && cameraId.equals(slot.cameraId)
+            && mCameraRecovery.isCurrent(slot.cameraAttempt);
     }
 
     private void createCaptureSession(final CameraSlotState slot,
@@ -515,12 +608,12 @@ public final class CameraStreamingService extends Service {
         final CameraSurfaceFrameReader.FrameTarget frameTarget,
         final long openGeneration) {
         if (frameTarget == null || slot.frameTarget != frameTarget) {
-            closeCameraSlot(slot, "OPEN FAILED: 官方预览Surface为空");
+            failCameraSlot(slot, slot.cameraAttempt, "validateSurface", "官方预览Surface为空");
             return;
         }
         final Surface previewSurface = frameTarget.getSurface();
         if (previewSurface == null || !previewSurface.isValid()) {
-            closeCameraSlot(slot, "OPEN FAILED: 官方预览Surface无效");
+            failCameraSlot(slot, slot.cameraAttempt, "validateSurface", "官方预览Surface无效");
             return;
         }
         try {
@@ -554,34 +647,26 @@ public final class CameraStreamingService extends Service {
                                 + "，SurfaceTexture=" + TARGET_WIDTH + "x" + TARGET_HEIGHT
                                 + "，request=TEMPLATE_PREVIEW，target=单Surface");
                         } catch (final Exception exception) {
-                            log("Camera2后台：第" + (slot.slotIndex + 1)
-                                + "路启动采集失败：" + exception.getMessage());
-                            closeCameraSlot(slot, "OPEN FAILED: " + exception.getMessage());
-                            scheduleCameraReconcile(CAMERA_RECONNECT_DELAY_MS);
+                            failCameraSlot(slot, slot.cameraAttempt, "setRepeatingRequest",
+                                describeCameraException(exception));
                         }
                     }
 
                     @Override
                     public void onConfigureFailed(final CameraCaptureSession session) {
                         session.close();
-                        if (slot.openGeneration != openGeneration) return;
-                        log("Camera2后台：第" + (slot.slotIndex + 1)
-                            + "路Session配置失败，cameraId=" + slot.cameraId);
-                        closeCameraSlot(slot,
-                            "OPEN FAILED: Camera2 session configure failed");
-                        scheduleCameraReconcile(CAMERA_RECONNECT_DELAY_MS);
+                        if (!mStreamingStarted || slot.openGeneration != openGeneration
+                            || slot.cameraDevice != cameraDevice) return;
+                        failCameraSlot(slot, slot.cameraAttempt, "onConfigureFailed",
+                            "Camera2 session configure failed");
                     }
-                }, null);
+                }, mCameraHandler);
         } catch (final CameraAccessException cameraAccessException) {
-            log("Camera2后台：第" + (slot.slotIndex + 1)
-                + "路创建Session失败：" + cameraAccessException.getMessage());
-            closeCameraSlot(slot, "OPEN FAILED: " + cameraAccessException.getMessage());
-            scheduleCameraReconcile(CAMERA_RECONNECT_DELAY_MS);
+            failCameraSlot(slot, slot.cameraAttempt, "createCaptureSession",
+                describeCameraException(cameraAccessException));
         } catch (final RuntimeException runtimeException) {
-            log("Camera2后台：第" + (slot.slotIndex + 1)
-                + "路创建官方Session异常：" + runtimeException.getMessage());
-            closeCameraSlot(slot, "OPEN FAILED: " + runtimeException.getMessage());
-            scheduleCameraReconcile(CAMERA_RECONNECT_DELAY_MS);
+            failCameraSlot(slot, slot.cameraAttempt, "createCaptureSession",
+                describeCameraException(runtimeException));
         }
     }
 
@@ -598,8 +683,6 @@ public final class CameraStreamingService extends Service {
                 mStreamHub.stop();
                 mStreamHub = null;
             }
-            stopCameraThread();
-            mCameraManager = null;
         }
     }
 
@@ -611,10 +694,11 @@ public final class CameraStreamingService extends Service {
         if (slot == null) return;
         slot.openGeneration++;
         final CameraCaptureSession captureSession = slot.captureSession;
-        final CameraDevice cameraDevice = slot.cameraDevice;
+        final CameraRecoveryController.Attempt<CameraDevice> attempt = slot.cameraAttempt;
         final CameraSurfaceFrameReader.FrameTarget frameTarget = slot.frameTarget;
         slot.captureSession = null;
         slot.cameraDevice = null;
+        slot.cameraAttempt = null;
         slot.frameTarget = null;
         slot.cameraId = null;
         slot.status = finalStatus;
@@ -628,17 +712,29 @@ public final class CameraStreamingService extends Service {
                 captureSession.abortCaptures();
             } catch (final Exception ignored) {
             }
-            captureSession.close();
+            try {
+                captureSession.close();
+            } catch (final RuntimeException exception) {
+                log("Camera2 Session关闭异常：" + describeCameraException(exception));
+            }
         }
-        if (cameraDevice != null) {
-            cameraDevice.close();
+        mCameraRecovery.retire(attempt);
+        if (attempt == null) {
+            releaseFrameTarget(frameTarget);
         }
-        if (frameTarget != null) {
-            frameTarget.release();
-        }
+        // A submitted open owns its Surface until onClosed; close() is asynchronous.
         final CameraStreamHub streamHub = mStreamHub;
         if (streamHub != null) {
             streamHub.onSlotClosed(slot.slotIndex, slot.status);
+        }
+    }
+
+    private void releaseFrameTarget(final CameraSurfaceFrameReader.FrameTarget frameTarget) {
+        if (frameTarget == null) return;
+        try {
+            frameTarget.release();
+        } catch (final RuntimeException exception) {
+            log("Camera2 Surface释放异常：" + describeCameraException(exception));
         }
     }
 
@@ -651,7 +747,7 @@ public final class CameraStreamingService extends Service {
 
         final CountDownLatch closeLatch = new CountDownLatch(1);
         cameraHandler.removeCallbacks(mCameraReconcileRunnable);
-        cameraHandler.post(new Runnable() {
+        final boolean cleanupPosted = cameraHandler.post(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -661,6 +757,10 @@ public final class CameraStreamingService extends Service {
                 }
             }
         });
+        if (!cleanupPosted) {
+            log("Camera2后台：关闭任务无法提交，相机回调线程已退出");
+            return;
+        }
         try {
             if (!closeLatch.await(3, TimeUnit.SECONDS)) {
                 log("Camera2后台：等待相机资源关闭超时");
@@ -672,11 +772,13 @@ public final class CameraStreamingService extends Service {
 
     private void closeCameraResourcesNow() {
         unregisterAvailabilityCallback();
+        mCameraManager = null;
         closeAllCameraSlots();
-        if (mSurfaceFrameReader != null) {
-            mSurfaceFrameReader.release();
-            mSurfaceFrameReader = null;
+        mCameraRecovery.stop();
+        if (mCameraRecovery.hasOwnedAttempts()) {
+            log("Camera2后台：已请求关闭，保留回调线程等待未完成的打开/关闭确认");
         }
+        finishCameraShutdownIfIdle();
     }
 
     private void unregisterAvailabilityCallback() {
@@ -700,17 +802,24 @@ public final class CameraStreamingService extends Service {
         mCameraHandler = new Handler(mCameraThread.getLooper());
     }
 
-    private void stopCameraThread() {
+    private void finishCameraShutdownIfIdle() {
+        // A last onClosed may race with the main thread posting cleanup. Only the camera-thread
+        // stop() call, after unregistering availability, is allowed to authorize thread exit.
+        if (mStreamingStarted || !mCameraRecovery.canFinishShutdown()) return;
+        if (mSurfaceFrameReader != null) {
+            try {
+                mSurfaceFrameReader.release();
+            } catch (final RuntimeException exception) {
+                log("Camera2读回器释放异常：" + describeCameraException(exception));
+            }
+            mSurfaceFrameReader = null;
+        }
         final HandlerThread cameraThread = mCameraThread;
         mCameraThread = null;
         mCameraHandler = null;
         if (cameraThread == null) return;
+        // Do not discard late onOpened/onError callbacks before their device has been closed.
         cameraThread.quitSafely();
-        try {
-            cameraThread.join(2000);
-        } catch (final InterruptedException interruptedException) {
-            Thread.currentThread().interrupt();
-        }
     }
 
     private boolean hasCameraPermission() {
@@ -798,6 +907,7 @@ public final class CameraStreamingService extends Service {
         volatile String cameraId;
         volatile String status = "EMPTY";
         volatile CameraDevice cameraDevice;
+        CameraRecoveryController.Attempt<CameraDevice> cameraAttempt;
         volatile CameraCaptureSession captureSession;
         volatile CameraSurfaceFrameReader.FrameTarget frameTarget;
         volatile long frameCount;
